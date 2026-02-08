@@ -1,0 +1,15 @@
+# river-wm configuration
+# Place this file at ~/.config/river-wm/config.toml
+
+# Terminal emulator command
+terminal = "foot"
+
+# Application launcher command
+launcher = "fuzzel"
+
+# Border width in pixels (0 to disable borders)
+border_width = 2
+
+# Default layout mode for new desktops
+# Options: "fullscreen", "max", "split"
+default_layout = "max"

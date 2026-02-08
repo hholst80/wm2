@@ -1,0 +1,228 @@
+      </description>
+      <arg name="shell_surface" type="object" interface="river_shell_surface_v1"/>
+    </event>
+
+    <request name="op_start_pointer">
+      <description summary="start an interactive pointer operation">
+        Start an interactive pointer operation. During the operation, op_delta
+        events will be sent based on pointer input.
+
+        When all pointer buttons are released, the op_release event is sent.
+
+        The pointer operation continues until the op_end request is made during
+        a manage sequence and that manage sequence is finished.
+
+        The window manager may use this operation to implement interactive
+        move/resize of windows by setting the position of windows and proposing
+        dimensions based off of the op_delta events.
+
+        This request is ignored if an operation is already in progress.
+
+        This request modifies window management state and may only be made as
+        part of a manage sequence, see the river_window_manager_v1 description.
+      </description>
+    </request>
+
+    <event name="op_delta">
+      <description summary="total cumulative motion since op start">
+        This event indicates the total change in position since the start of the
+        operation of the pointer/touch point/etc.
+
+        This event will be followed by a manage_start event after all other new
+        state has been sent by the server.
+      </description>
+      <arg name="dx" type="int" summary="total change in x"/>
+      <arg name="dy" type="int" summary="total change in y"/>
+    </event>
+
+    <event name="op_release">
+      <description summary="operation input has been released">
+        The input driving the current interactive operation has been released.
+        For a pointer op for example, all pointer buttons have been released.
+
+        Depending on the op type, op_delta events may continue to be sent until
+        the op is ended with the op_end request.
+
+        This event is sent at most once during an interactive operation.
+
+        This event will be followed by a manage_start event after all other new
+        state has been sent by the server.
+      </description>
+    </event>
+
+    <request name="op_end">
+      <description summary="end an interactive operation">
+        End an interactive operation.
+
+        This request is ignored if there is no operation in progress.
+
+        This request modifies window management state and may only be made as
+        part of a manage sequence, see the river_window_manager_v1 description.
+      </description>
+    </request>
+
+    <enum name="modifiers" bitfield="true">
+      <description summary="a set of keyboard modifiers">
+        This enum is used to describe the keyboard modifiers that must be held
+        down to trigger a key binding or pointer binding.
+
+        Note that river and wlroots use the values 2 and 16 for capslock and
+        numlock internally. It doesn't make sense to use locked modifiers for
+        bindings however so these values are not included in this enum.
+      </description>
+      <entry name="none" value="0"/>
+      <entry name="shift" value="1"/>
+      <entry name="ctrl" value="4"/>
+      <entry name="mod1" value="8" summary="commonly called alt"/>
+      <entry name="mod3" value="32"/>
+      <entry name="mod4" value="64" summary="commonly called super or logo"/>
+      <entry name="mod5" value="128"/>
+    </enum>
+
+    <request name="get_pointer_binding">
+      <description summary="define a new pointer binding">
+        Define a pointer binding in terms of a pointer button, modifiers, and
+        other configurable properties.
+
+        The button argument is a Linux input event code defined in the
+        linux/input-event-codes.h header file (e.g. BTN_RIGHT).
+
+        The new pointer binding is not enabled until initial configuration is
+        completed and the enable request is made during a manage sequence.
+      </description>
+      <arg name="id" type="new_id" interface="river_pointer_binding_v1"/>
+      <arg name="button" type="uint" summary="a Linux input event code"/>
+      <arg name="modifiers" type="uint" enum="modifiers"/>
+    </request>
+
+    <request name="set_xcursor_theme" since="2">
+      <description summary="set the xcursor theme for the seat">
+        Set the XCursor theme for the seat. This theme is used for cursors
+        rendered by the compositor, but not necessarily for cursors rendered by
+        clients.
+
+        Note: The window manager may also wish to set the XCURSOR_THEME and
+        XCURSOR_SIZE environment variable for programs it starts.
+      </description>
+      <arg name="name" type="string"/>
+      <arg name="size" type="uint"/>
+    </request>
+
+    <event name="pointer_position" since="2">
+      <description summary="The current position of the pointer">
+        The current position of the pointer in the compositor's logical
+        coordinate space.
+
+        This state is special in that a change in pointer position alone must
+        not cause the compositor to start a manage sequence.
+
+        Assuming the seat has a pointer, this event must be sent in every manage
+        sequence unless there is no change in x/y position since the last time this
+        event was sent.
+      </description>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </event>
+
+    <request name="pointer_warp" since="3">
+      <description summary="warp the pointer to a given position">
+        Warp the pointer to the given position in the compositor's logical
+        coordinate space.
+
+        If the given position is outside the bounds of all outputs, the pointer
+        will be warped to the closest point inside an output instead.
+
+        This request modifies window management state and may only be made as
+        part of a manage sequence, see the river_window_manager_v1 description.
+      </description>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </request>
+  </interface>
+
+  <interface name="river_pointer_binding_v1" version="3">
+    <description summary="configure a pointer binding, receive trigger events">
+      This object allows the window manager to configure a pointer binding and
+      receive events when the binding is triggered.
+
+      The new pointer binding is not enabled until the enable request is made
+      during a manage sequence.
+
+      Normally, all pointer button events are sent to the surface with pointer
+      focus by the compositor. Pointer button events that trigger a pointer
+      binding are not sent to the surface with pointer focus.
+
+      If multiple pointer bindings would be triggered by a single physical
+      pointer event on the compositor side, it is compositor policy which
+      pointer binding(s) will receive press/release events or if all of the
+      matched pointer bindings receive press/release events.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the pointer binding object">
+        This request indicates that the client will no longer use the pointer
+        binding object and that it may be safely destroyed.
+      </description>
+    </request>
+
+    <request name="enable">
+      <description summary="enable the pointer binding">
+        This request should be made after all initial configuration has been
+        completed and the window manager wishes the pointer binding to be able
+        to be triggered.
+
+        This request modifies window management state and may only be made as
+        part of a manage sequence, see the river_window_manager_v1 description.
+      </description>
+    </request>
+
+    <request name="disable">
+      <description summary="disable the pointer binding">
+        This request may be used to temporarily disable the pointer binding. It
+        may be later re-enabled with the enable request.
+
+        This request modifies window management state and may only be made as
+        part of a manage sequence, see the river_window_manager_v1 description.
+      </description>
+    </request>
+
+    <event name="pressed">
+      <description summary="the bound pointer button has been pressed">
+        This event indicates that the pointer button triggering the binding has
+        been pressed.
+
+        This event will be followed by a manage_start event after all other new
+        state has been sent by the server.
+
+        The compositor should wait for the manage sequence to complete before
+        processing further input events. This allows the window manager client
+        to, for example, modify key bindings and keyboard focus without racing
+        against future input events. The window manager should of course respond
+        as soon as possible as the capacity of the compositor to buffer incoming
+        input events is finite.
+      </description>
+    </event>
+
+    <event name="released">
+      <description summary="the bound pointer button has been released">
+        This event indicates that the pointer button triggering the binding has
+        been released.
+
+        Releasing the modifiers for the binding without releasing the pointer
+        button does not trigger the release event. This event is sent when the
+        pointer button is released, even if the modifiers have changed since the
+        pressed event.
+
+        This event will be followed by a manage_start event after all other new
+        state has been sent by the server.
+
+        The compositor should wait for the manage sequence to complete before
+        processing further input events. This allows the window manager client
+        to, for example, modify key bindings and keyboard focus without racing
+        against future input events. The window manager should of course respond
+        as soon as possible as the capacity of the compositor to buffer incoming
+        input events is finite.
+      </description>
+    </event>
+  </interface>
+</protocol>

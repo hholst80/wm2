@@ -1,0 +1,31 @@
+#!/bin/sh
+#
+# Example River init script for use with river-wm.
+# Place this file at ~/.config/river/init and make it executable:
+#   chmod +x ~/.config/river/init
+#
+
+# Path to the river-wm installation
+RIVER_WM_DIR="${RIVER_WM_DIR:-$HOME/river-wm}"
+
+# Set environment variables for child processes
+export XCURSOR_THEME="Adwaita"
+export XCURSOR_SIZE=24
+
+# Start the window manager
+python3 "$RIVER_WM_DIR/river_wm.py" &
+
+# Optional: start a status bar (e.g., waybar)
+# waybar &
+
+# Optional: set a wallpaper
+# swaybg -i "$HOME/wallpaper.png" -m fill &
+
+# Optional: start a notification daemon
+# mako &
+
+# Optional: start an idle manager
+# swayidle -w \
+#     timeout 300 'swaylock -f -c 000000' \
+#     timeout 600 'wlopm --off \*' \
+#     resume 'wlopm --on \*' &
