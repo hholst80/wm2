@@ -935,8 +935,7 @@ class RiverWM:
             right_visible = self._visible_top(desktop.right_stack)
             if left_visible and right_visible:
                 left_visible.proxy.propose_dimensions(half_w, ua_h)
-                right_w = ua_w - (left_visible.width if left_visible.width > 0 else half_w)
-                right_visible.proxy.propose_dimensions(right_w, ua_h)
+                right_visible.proxy.propose_dimensions(half_w, ua_h)
             elif left_visible:
                 left_visible.proxy.propose_dimensions(ua_w, ua_h)
             elif right_visible:
@@ -1031,8 +1030,14 @@ class RiverWM:
             else:
                 win.proxy.hide()
 
-        # Right stack — positioned flush against left window's actual right edge
-        right_x = ua_x + (left_visible.width if left_visible else ua_w // 2)
+        # Right stack — right-aligned to the right edge of usable area
+        right_visible = self._visible_top(desktop.right_stack)
+        if right_visible and right_visible.width > 0:
+            right_x = ua_x + ua_w - right_visible.width
+        elif left_visible and left_visible.width > 0:
+            right_x = ua_x + left_visible.width
+        else:
+            right_x = ua_x + ua_w // 2
         for i, win in enumerate(desktop.right_stack):
             if win.closed:
                 continue
