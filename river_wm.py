@@ -36,6 +36,11 @@ from protocols.river_xkb_bindings_v1 import (
     RiverXkbBindingsV1,
     RiverXkbBindingV1,
 )
+from protocols.river_xkb_config_v1 import (
+    RiverXkbConfigV1,
+    RiverXkbKeymapV1,
+    RiverXkbKeyboardV1,
+)
 from protocols.river_layer_shell_v1 import (
     RiverLayerShellV1,
 )
@@ -376,6 +381,9 @@ class RiverWM:
         self.wm_proxy = None  # RiverWindowManagerV1 proxy
         self.xkb_bindings_proxy = None  # RiverXkbBindingsV1 proxy
         self.layer_shell_proxy = None  # RiverLayerShellV1 proxy
+        self.xkb_config_proxy = None   # RiverXkbConfigV1 proxy
+        self.xkb_keymap_obj = None     # RiverXkbKeymapV1 (after success)
+        self.xkb_keyboards: list = []  # RiverXkbKeyboardV1 objects
 
         # State
         self.windows: dict = {}  # proxy id -> WindowState
@@ -450,6 +458,10 @@ class RiverWM:
             self._setup_wm_events()
         elif iface_name == "river_xkb_bindings_v1":
             self.xkb_bindings_proxy = registry.bind(id_num, RiverXkbBindingsV1, min(version, 2))
+        elif iface_name == "river_xkb_config_v1":
+            self.xkb_config_proxy = registry.bind(id_num, RiverXkbConfigV1, min(version, 1))
+            self.xkb_config_proxy.dispatcher["xkb_keyboard"] = self._on_xkb_keyboard
+            logger.info("Bound river_xkb_config_v1 — runtime keymap control enabled")
         elif iface_name == "river_layer_shell_v1":
             self.layer_shell_proxy = registry.bind(id_num, RiverLayerShellV1, min(version, 1))
             logger.info("Bound river_layer_shell_v1 — layer surfaces enabled")
@@ -1438,22 +1450,84 @@ class RiverWM:
                 return s
         return None
 
-    def _check_xkb_env(self):
-        """Warn if XKB env vars don't match config (must be set before River)."""
-        if self.config.xkb_options:
-            current = os.environ.get("XKB_DEFAULT_OPTIONS", "")
-            if current != self.config.xkb_options:
-                logger.warning(
-                    "xkb_options=%r in config but XKB_DEFAULT_OPTIONS=%r in env; "
-                    "set it in ~/.profile before River starts",
-                    self.config.xkb_options, current)
+    def _apply_xkb_keymap(self):
+        """Apply XKB keymap via river-xkb-config-v1 protocol at runtime."""
+        if self.xkb_config_proxy is None:
+            if self.config.xkb_options or self.config.xkb_layout:
+                logger.warning("river_xkb_config_v1 not available; cannot apply XKB keymap")
+            return
+
+        if not self.config.xkb_options and not self.config.xkb_layout:
+            return
+
+        # Build xkbcli command
+        cmd = ["xkbcli", "compile-keymap"]
         if self.config.xkb_layout:
-            current = os.environ.get("XKB_DEFAULT_LAYOUT", "")
-            if current != self.config.xkb_layout:
-                logger.warning(
-                    "xkb_layout=%r in config but XKB_DEFAULT_LAYOUT=%r in env; "
-                    "set it in ~/.profile before River starts",
-                    self.config.xkb_layout, current)
+            cmd += ["--layout", self.config.xkb_layout]
+        if self.config.xkb_options:
+            cmd += ["--options", self.config.xkb_options]
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            if result.returncode != 0:
+                logger.error("xkbcli compile-keymap failed: %s", result.stderr.strip())
+                return
+            keymap_text = result.stdout
+        except FileNotFoundError:
+            logger.error("xkbcli not found; cannot compile XKB keymap")
+            return
+        except subprocess.TimeoutExpired:
+            logger.error("xkbcli compile-keymap timed out")
+            return
+
+        # Write keymap to a memfd for the compositor to mmap
+        keymap_bytes = keymap_text.encode("utf-8")
+        fd = os.memfd_create("xkb-keymap")
+        os.write(fd, keymap_bytes)
+        os.lseek(fd, 0, os.SEEK_SET)
+
+        # Create the keymap object (format 1 = XKB_KEYMAP_FORMAT_TEXT_V1)
+        keymap_proxy = self.xkb_config_proxy.create_keymap(fd, 1)
+        os.close(fd)
+
+        def _on_keymap_success(proxy):
+            self.xkb_keymap_obj = proxy
+            logger.info("Applied XKB keymap (layout=%s options=%s)",
+                        self.config.xkb_layout or "(default)",
+                        self.config.xkb_options or "(default)")
+            # Apply to any keyboards we already know about
+            for kb in self.xkb_keyboards:
+                kb.set_keymap(self.xkb_keymap_obj)
+
+        def _on_keymap_failure(proxy, error_msg):
+            logger.error("XKB keymap creation failed: %s", error_msg)
+
+        keymap_proxy.dispatcher["success"] = _on_keymap_success
+        keymap_proxy.dispatcher["failure"] = _on_keymap_failure
+
+    def _on_xkb_keyboard(self, xkb_config_proxy, keyboard_proxy):
+        """Handle new xkb keyboard from river_xkb_config_v1."""
+        self.xkb_keyboards.append(keyboard_proxy)
+
+        def _on_keyboard_removed(proxy):
+            if proxy in self.xkb_keyboards:
+                self.xkb_keyboards.remove(proxy)
+            logger.info("XKB keyboard removed")
+
+        keyboard_proxy.dispatcher["removed"] = _on_keyboard_removed
+        keyboard_proxy.dispatcher["input_device"] = lambda p, dev: None
+        keyboard_proxy.dispatcher["layout"] = lambda p, idx, name: None
+        keyboard_proxy.dispatcher["capslock_enabled"] = lambda p: None
+        keyboard_proxy.dispatcher["capslock_disabled"] = lambda p: None
+        keyboard_proxy.dispatcher["numlock_enabled"] = lambda p: None
+        keyboard_proxy.dispatcher["numlock_disabled"] = lambda p: None
+
+        # If keymap already created, apply it to this keyboard
+        if self.xkb_keymap_obj is not None:
+            keyboard_proxy.set_keymap(self.xkb_keymap_obj)
+            logger.info("Applied XKB keymap to new keyboard")
+        else:
+            logger.debug("XKB keyboard appeared (keymap not yet ready)")
 
     # -------------------------------------------------------------------
     # Main loop
@@ -1465,8 +1539,9 @@ class RiverWM:
         # Do an initial roundtrip to get outputs and seats
         self.display.roundtrip()
 
-        # Check XKB env matches config (must be set before River starts)
-        self._check_xkb_env()
+        # Apply XKB keymap via river-xkb-config-v1 protocol
+        self._apply_xkb_keymap()
+        self.display.roundtrip()  # process keymap success + apply to keyboards
 
         # Setup keybindings
         self.setup_keybindings()

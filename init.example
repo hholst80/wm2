@@ -12,9 +12,6 @@ RIVER_WM_DIR="${RIVER_WM_DIR:-$HOME/river-wm}"
 export XCURSOR_THEME="Adwaita"
 export XCURSOR_SIZE=24
 
-# Keyboard layout is configured via config.toml (xkb_layout / xkb_options).
-# The WM applies it automatically at startup via riverctl.
-
 # Start the window manager
 python3 "$RIVER_WM_DIR/river_wm.py" &
 

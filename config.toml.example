@@ -15,8 +15,10 @@ border_width = 2
 default_layout = "max"
 
 # XKB keyboard layout (e.g. "us", "se", "de")
+# Applied at runtime via river-xkb-config-v1 protocol.
 # xkb_layout = "us"
 
 # XKB options (e.g. "ctrl:nocaps" to map CapsLock as Ctrl)
-# See xkeyboard-config(7) for all available options
+# Applied at runtime via river-xkb-config-v1 protocol.
+# See xkeyboard-config(7) for all available options.
 xkb_options = "ctrl:nocaps"

@@ -41,8 +41,10 @@ pip install pywayland
 # Generate protocol bindings (already included, but can be regenerated)
 python3 -m pywayland.scanner \
   -i /usr/share/wayland/wayland.xml \
-     protocol/river-window-management-v1.xml \
-     protocol/river-xkb-bindings-v1.xml \
+     river-window-management-v1.xml \
+     river-xkb-bindings-v1.xml \
+     river-xkb-config-v1.xml \
+     river-input-management-v1.xml \
   -o protocols/
 
 # Make the main script executable
@@ -182,6 +184,8 @@ river-wm/
 ├── protocols/                # Generated pywayland protocol bindings
 │   ├── river_window_management_v1/
 │   ├── river_xkb_bindings_v1/
+│   ├── river_xkb_config_v1/
+│   ├── river_input_management_v1/
 │   └── wayland/
 ├── config.toml.example       # Example configuration file
 ├── init.example              # Example River init script
