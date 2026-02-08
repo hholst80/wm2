@@ -5,4 +5,3 @@ test_binary
 test_io
 test_io2
 claude.ai_public_artifacts_*.md
-river_window_v1.py

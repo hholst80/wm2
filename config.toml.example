@@ -13,3 +13,10 @@ border_width = 2
 # Default layout mode for new desktops
 # Options: "fullscreen", "max", "split"
 default_layout = "max"
+
+# XKB keyboard layout (e.g. "us", "se", "de")
+# xkb_layout = "us"
+
+# XKB options (e.g. "ctrl:nocaps" to map CapsLock as Ctrl)
+# See xkeyboard-config(7) for all available options
+xkb_options = "ctrl:nocaps"

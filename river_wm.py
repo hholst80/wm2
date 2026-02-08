@@ -132,6 +132,8 @@ class Config:
     border_width: int = BORDER_WIDTH
     default_layout: LayoutMode = LayoutMode.MAX
     bar_height: int = 0  # logical pixels reserved for top bar (auto-detected if 0)
+    xkb_layout: str = ""   # XKB keyboard layout (e.g. "us"), empty = don't touch
+    xkb_options: str = ""   # XKB options (e.g. "ctrl:nocaps"), empty = don't touch
 
     @classmethod
     def load(cls, path: Optional[str] = None) -> "Config":
@@ -156,6 +158,8 @@ class Config:
                 cfg.launcher_cmd = data.get("launcher", cfg.launcher_cmd)
                 cfg.border_width = data.get("border_width", cfg.border_width)
                 cfg.bar_height = data.get("bar_height", cfg.bar_height)
+                cfg.xkb_layout = data.get("xkb_layout", cfg.xkb_layout)
+                cfg.xkb_options = data.get("xkb_options", cfg.xkb_options)
                 layout_str = data.get("default_layout", cfg.default_layout.value)
                 cfg.default_layout = LayoutMode(layout_str)
                 logger.info("Loaded config from %s", path)
@@ -1413,6 +1417,25 @@ class RiverWM:
                 return s
         return None
 
+    def _apply_xkb_options(self):
+        """Apply XKB keyboard layout/options via riverctl."""
+        layout = self.config.xkb_layout or "us"
+        options = self.config.xkb_options
+        if not options and not self.config.xkb_layout:
+            return  # nothing configured
+        cmd = ["riverctl", "keyboard-layout"]
+        if options:
+            cmd += ["-options", options]
+        cmd.append(layout)
+        try:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                           check=True)
+            logger.info("Applied XKB: layout=%s options=%s", layout, options)
+        except FileNotFoundError:
+            logger.warning("riverctl not found; cannot set keyboard layout")
+        except subprocess.CalledProcessError as e:
+            logger.warning("riverctl keyboard-layout failed: %s", e.stderr.decode().strip())
+
     # -------------------------------------------------------------------
     # Main loop
     # -------------------------------------------------------------------
@@ -1422,6 +1445,9 @@ class RiverWM:
 
         # Do an initial roundtrip to get outputs and seats
         self.display.roundtrip()
+
+        # Apply XKB keyboard options (e.g. caps→ctrl)
+        self._apply_xkb_options()
 
         # Setup keybindings
         self.setup_keybindings()
