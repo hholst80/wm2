@@ -931,9 +931,16 @@ class RiverWM:
                     win.proxy.propose_dimensions(ua_w, ua_h)
         elif desktop.layout == LayoutMode.SPLIT:
             half_w = ua_w // 2
-            for win in desktop.left_stack + desktop.right_stack:
-                if not win.closed:
-                    win.proxy.propose_dimensions(half_w, ua_h)
+            left_visible = self._visible_top(desktop.left_stack)
+            right_visible = self._visible_top(desktop.right_stack)
+            if left_visible and right_visible:
+                left_visible.proxy.propose_dimensions(half_w, ua_h)
+                right_w = ua_w - (left_visible.width if left_visible.width > 0 else half_w)
+                right_visible.proxy.propose_dimensions(right_w, ua_h)
+            elif left_visible:
+                left_visible.proxy.propose_dimensions(ua_w, ua_h)
+            elif right_visible:
+                right_visible.proxy.propose_dimensions(ua_w, ua_h)
 
         # Set focus
         if seat and focused and not focused.closed:
@@ -1010,9 +1017,9 @@ class RiverWM:
     def _layout_split(self, desktop: Desktop, output: OutputState, focused: Optional[WindowState]):
         """2-split layout: left and right halves, top of each stack visible."""
         ua_x, ua_y, ua_w, ua_h = self._usable_area(output)
-        half_w = ua_w // 2
+        left_visible = self._visible_top(desktop.left_stack)
 
-        # Left stack — always positioned at left half
+        # Left stack — always positioned at left edge
         for i, win in enumerate(desktop.left_stack):
             if win.closed:
                 continue
@@ -1024,14 +1031,15 @@ class RiverWM:
             else:
                 win.proxy.hide()
 
-        # Right stack — always positioned at right half
+        # Right stack — positioned flush against left window's actual right edge
+        right_x = ua_x + (left_visible.width if left_visible else ua_w // 2)
         for i, win in enumerate(desktop.right_stack):
             if win.closed:
                 continue
             if i == 0:
                 win.proxy.show()
                 if win.node:
-                    win.node.set_position(ua_x + half_w, ua_y)
+                    win.node.set_position(right_x, ua_y)
                 self._set_borders(win, win == focused)
             else:
                 win.proxy.hide()
@@ -1052,6 +1060,14 @@ class RiverWM:
                 win.node.set_position(win.pos_x, win.pos_y)
                 win.node.place_top()
             self._set_borders(win, win == focused)
+
+    @staticmethod
+    def _visible_top(stack: list) -> Optional[WindowState]:
+        """Return the first non-closed window in a stack, or None."""
+        for win in stack:
+            if not win.closed:
+                return win
+        return None
 
     def _set_borders(self, win: WindowState, is_focused: bool):
         """Set border styling for a window."""
@@ -1417,24 +1433,22 @@ class RiverWM:
                 return s
         return None
 
-    def _apply_xkb_options(self):
-        """Apply XKB keyboard layout/options via riverctl."""
-        layout = self.config.xkb_layout or "us"
-        options = self.config.xkb_options
-        if not options and not self.config.xkb_layout:
-            return  # nothing configured
-        cmd = ["riverctl", "keyboard-layout"]
-        if options:
-            cmd += ["-options", options]
-        cmd.append(layout)
-        try:
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                           check=True)
-            logger.info("Applied XKB: layout=%s options=%s", layout, options)
-        except FileNotFoundError:
-            logger.warning("riverctl not found; cannot set keyboard layout")
-        except subprocess.CalledProcessError as e:
-            logger.warning("riverctl keyboard-layout failed: %s", e.stderr.decode().strip())
+    def _check_xkb_env(self):
+        """Warn if XKB env vars don't match config (must be set before River)."""
+        if self.config.xkb_options:
+            current = os.environ.get("XKB_DEFAULT_OPTIONS", "")
+            if current != self.config.xkb_options:
+                logger.warning(
+                    "xkb_options=%r in config but XKB_DEFAULT_OPTIONS=%r in env; "
+                    "set it in ~/.profile before River starts",
+                    self.config.xkb_options, current)
+        if self.config.xkb_layout:
+            current = os.environ.get("XKB_DEFAULT_LAYOUT", "")
+            if current != self.config.xkb_layout:
+                logger.warning(
+                    "xkb_layout=%r in config but XKB_DEFAULT_LAYOUT=%r in env; "
+                    "set it in ~/.profile before River starts",
+                    self.config.xkb_layout, current)
 
     # -------------------------------------------------------------------
     # Main loop
@@ -1446,8 +1460,8 @@ class RiverWM:
         # Do an initial roundtrip to get outputs and seats
         self.display.roundtrip()
 
-        # Apply XKB keyboard options (e.g. caps→ctrl)
-        self._apply_xkb_options()
+        # Check XKB env matches config (must be set before River starts)
+        self._check_xkb_env()
 
         # Setup keybindings
         self.setup_keybindings()
