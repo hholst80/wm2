@@ -1235,6 +1235,8 @@ class RiverWM:
 
         # 2-split: move focus to other side
         bind_key(XKB_KEY_Tab, MOD_SUPER, lambda: self._action_focus_other_side())
+        bind_key(XKB_KEY_h, MOD_SUPER, lambda: self._action_focus_side(Side.LEFT))
+        bind_key(XKB_KEY_l, MOD_SUPER, lambda: self._action_focus_side(Side.RIGHT))
 
         # 2-split: cycle window on current side
         bind_key(XKB_KEY_n, MOD_SUPER, lambda: self._action_cycle_side())
@@ -1349,6 +1351,14 @@ class RiverWM:
         else:
             desktop.focused_side = Side.LEFT
         self.wm_proxy.manage_dirty()
+
+    def _action_focus_side(self, side: Side):
+        desktop = self.current_desktop
+        if desktop.layout != LayoutMode.SPLIT:
+            return
+        if desktop.focused_side != side:
+            desktop.focused_side = side
+            self.wm_proxy.manage_dirty()
 
     def _action_cycle_side(self):
         desktop = self.current_desktop
