@@ -48,7 +48,7 @@ python3 -m pywayland.scanner \
   -o protocols/
 
 # Make the main script executable
-chmod +x river_wm.py
+chmod +x wm2.py
 ```
 
 ## Usage
@@ -57,7 +57,7 @@ wm2 is launched as part of your River init script. It connects to the Wayland di
 
 ```bash
 # Launch directly (River must be running)
-python3 /path/to/wm2/river_wm.py &
+python3 /path/to/wm2/wm2.py &
 ```
 
 ### Sample River Init Script
@@ -68,7 +68,7 @@ Place the following in `~/.config/river/init` and make it executable:
 #!/bin/sh
 
 # Start the window manager
-python3 /path/to/wm2/river_wm.py &
+python3 /path/to/wm2/wm2.py &
 
 # Optional: start a status bar
 # waybar &
@@ -186,7 +186,7 @@ This separation ensures frame-perfect atomic updates — all state changes are a
 
 ```
 wm2/
-├── river_wm.py              # Main window manager implementation
+├── wm2.py              # Main window manager implementation
 ├── protocols/                # Generated pywayland protocol bindings
 │   ├── river_window_management_v1/
 │   ├── river_xkb_bindings_v1/

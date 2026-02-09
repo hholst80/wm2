@@ -10,4 +10,4 @@ dependencies = [
 ]
 
 [project.scripts]
-wm2 = "river_wm:main"
+wm2 = "wm2:main"

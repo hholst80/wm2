@@ -6,14 +6,14 @@
 #
 
 # Path to the wm2 installation
-RIVER_WM_DIR="${RIVER_WM_DIR:-$HOME/wm2}"
+WM2_DIR="${WM2_DIR:-$HOME/wm2}"
 
 # Set environment variables for child processes
 export XCURSOR_THEME="Adwaita"
 export XCURSOR_SIZE=24
 
 # Start the window manager
-python3 "$RIVER_WM_DIR/river_wm.py" &
+python3 "$WM2_DIR/wm2.py" &
 
 # Optional: start a status bar (e.g., waybar)
 # waybar &
