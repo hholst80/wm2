@@ -268,7 +268,19 @@ class Desktop:
     def add_window(self, win: WindowState):
         """Add a window to the top of the appropriate stack."""
         if self.layout == LayoutMode.SPLIT:
-            if self.focused_side == Side.LEFT:
+            # Auto-balance: if focused side has windows and other side is empty,
+            # place on the empty side for natural split distribution
+            left_has = len(self.left_stack) > 0
+            right_has = len(self.right_stack) > 0
+            if self.focused_side == Side.LEFT and left_has and not right_has:
+                self.right_stack.insert(0, win)
+                win.side = Side.RIGHT
+                self.focused_side = Side.RIGHT
+            elif self.focused_side == Side.RIGHT and right_has and not left_has:
+                self.left_stack.insert(0, win)
+                win.side = Side.LEFT
+                self.focused_side = Side.LEFT
+            elif self.focused_side == Side.LEFT:
                 self.left_stack.insert(0, win)
                 win.side = Side.LEFT
             else:
@@ -950,13 +962,10 @@ class RiverWM:
             half_w = ua_w // 2
             left_visible = self._visible_top(desktop.left_stack)
             right_visible = self._visible_top(desktop.right_stack)
-            if left_visible and right_visible:
+            if left_visible:
                 left_visible.proxy.propose_dimensions(half_w, ua_h)
+            if right_visible:
                 right_visible.proxy.propose_dimensions(half_w, ua_h)
-            elif left_visible:
-                left_visible.proxy.propose_dimensions(ua_w, ua_h)
-            elif right_visible:
-                right_visible.proxy.propose_dimensions(ua_w, ua_h)
 
         # Set focus
         if seat and focused and not focused.closed:

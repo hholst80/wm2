@@ -14,7 +14,7 @@ A window manager for the [River](https://codeberg.org/river/river) Wayland compo
 |------|-------------|
 | **Fullscreen** | The focused window occupies the entire output (no gaps, no borders, covers panels). Other windows are hidden behind it. Cycling windows changes which window is fullscreen. |
 | **Max** | The focused window occupies the entire usable area (respects panels/bars). Only one window is visible at a time — a monocle layout. |
-| **2-Split** | The output is divided into two equal horizontal halves (left 50%, right 50%). Each side has its own ordered stack; only the top window on each side is visible. If one side is empty, the other takes the full width. |
+| **2-Split** | The output is divided into two equal horizontal halves (left 50%, right 50%). Each side has its own ordered stack; only the top window on each side is visible. New windows are auto-balanced to the empty side when the focused side already has a window. |
 
 **Focus Management.** Keyboard focus is explicitly managed by the WM. In max/fullscreen modes, focus is always on the single visible window. In 2-split mode, focus is on one of the two visible windows and can be moved between sides.
 
