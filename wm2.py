@@ -1298,7 +1298,11 @@ class RiverWM:
     def _action_move_to_floating(self):
         focused = self._get_focused_window()
         if focused:
-            self._move_window_to_desktop(focused, 0)
+            if focused.desktop_id == 0:
+                # Already floating — move back to current tiled desktop
+                self._move_window_to_desktop(focused, self.current_desktop_id)
+            else:
+                self._move_window_to_desktop(focused, 0)
         self.wm_proxy.manage_dirty()
 
     def _action_set_layout(self, mode: LayoutMode):
