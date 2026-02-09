@@ -1093,7 +1093,7 @@ class RiverWM:
 
     def _layout_floating(self, output: OutputState, focused: Optional[WindowState]):
         """Layout floating overlay windows."""
-        for i, win in enumerate(self.floating_stack):
+        for win in reversed(self.floating_stack):
             if win.closed:
                 continue
             win.proxy.show()
