@@ -1444,10 +1444,11 @@ class RiverWM:
         logger.info("Screenshot: full → clipboard")
 
     def _action_restart_wm(self):
-        """Hot-reload: exit with code 42 so the wrapper script restarts us."""
-        logger.info("Hot-reloading WM (exit 42)...")
-        self._restart_requested = True
-        self.running = False
+        """Hot-reload: clean shutdown then re-exec ourselves."""
+        logger.info("Hot-reloading WM (re-exec)...")
+        self.shutdown()
+        python = sys.executable
+        os.execv(python, [python] + sys.argv)
 
     def _action_pointer_move(self):
         if not self.seats:
@@ -1631,8 +1632,6 @@ def main():
     signal.signal(signal.SIGTERM, sigterm_handler)
 
     wm.run()
-    if getattr(wm, '_restart_requested', False):
-        sys.exit(42)
     sys.exit(1)
 
 
