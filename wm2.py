@@ -1249,6 +1249,8 @@ class RiverWM:
         # 2-split: move window to other side
         bind_key(XKB_KEY_o, MOD_SUPER, lambda: self._action_move_to_other_side())
         bind_key(XKB_KEY_Tab, MOD_SUPER | MOD_SHIFT, lambda: self._action_move_to_other_side())
+        bind_key(XKB_KEY_h, MOD_SUPER | MOD_SHIFT, lambda: self._action_move_to_side(Side.LEFT))
+        bind_key(XKB_KEY_l, MOD_SUPER | MOD_SHIFT, lambda: self._action_move_to_side(Side.RIGHT))
 
         # 2-split: move window up/down in stack
         bind_key(XKB_KEY_k, MOD_SUPER | MOD_SHIFT, lambda: self._action_move_up_in_stack())
@@ -1385,18 +1387,32 @@ class RiverWM:
         if focused is None:
             return
         if focused.side == Side.LEFT:
-            if focused in desktop.left_stack:
-                desktop.left_stack.remove(focused)
-            focused.side = Side.RIGHT
-            desktop.right_stack.insert(0, focused)
-            desktop.focused_side = Side.RIGHT
+            self._move_window_to_side(desktop, focused, Side.RIGHT)
         else:
-            if focused in desktop.right_stack:
-                desktop.right_stack.remove(focused)
-            focused.side = Side.LEFT
-            desktop.left_stack.insert(0, focused)
-            desktop.focused_side = Side.LEFT
+            self._move_window_to_side(desktop, focused, Side.LEFT)
         self.wm_proxy.manage_dirty()
+
+    def _action_move_to_side(self, side: Side):
+        desktop = self.current_desktop
+        if desktop.layout != LayoutMode.SPLIT:
+            return
+        focused = desktop.get_focused_window()
+        if focused is None or focused.side == side:
+            return
+        self._move_window_to_side(desktop, focused, side)
+        self.wm_proxy.manage_dirty()
+
+    def _move_window_to_side(self, desktop: DesktopState, win: WindowState, side: Side):
+        if win in desktop.left_stack:
+            desktop.left_stack.remove(win)
+        if win in desktop.right_stack:
+            desktop.right_stack.remove(win)
+        win.side = side
+        if side == Side.LEFT:
+            desktop.left_stack.insert(0, win)
+        else:
+            desktop.right_stack.insert(0, win)
+        desktop.focused_side = side
 
     def _action_move_up_in_stack(self):
         desktop = self.current_desktop
