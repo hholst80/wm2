@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-river-wm: A window manager for the River Wayland compositor (v0.4+).
+wm2: A window manager for the River Wayland compositor (v0.4+).
 
 Implements the river-window-management-v1 and river-xkb-bindings-v1 protocols
 to provide 4 desktops, a floating overlay stack, and 3 layout modes
@@ -45,7 +45,7 @@ from protocols.river_layer_shell_v1 import (
     RiverLayerShellV1,
 )
 
-logger = logging.getLogger("river-wm")
+logger = logging.getLogger("wm2")
 
 # ---------------------------------------------------------------------------
 # XKB keysym constants (from xkbcommon-keysyms.h)
@@ -137,8 +137,10 @@ class Config:
     border_width: int = BORDER_WIDTH
     default_layout: LayoutMode = LayoutMode.MAX
     bar_height: int = 0  # logical pixels reserved for top bar (auto-detected if 0)
-    xkb_layout: str = ""   # XKB keyboard layout (e.g. "us"), empty = don't touch
-    xkb_options: str = ""   # XKB options (e.g. "ctrl:nocaps"), empty = don't touch
+    xkb_layout: str = ""    # [xkb] layout (e.g. "us"), empty = don't touch
+    xkb_model: str = ""     # [xkb] model (e.g. "pc105"), empty = don't touch
+    xkb_variant: str = ""   # [xkb] variant (e.g. "dvorak"), empty = don't touch
+    xkb_options: str = ""   # [xkb] options (e.g. "ctrl:nocaps"), empty = don't touch
 
     @classmethod
     def load(cls, path: Optional[str] = None) -> "Config":
@@ -146,7 +148,7 @@ class Config:
         cfg = cls()
         if path is None:
             xdg = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
-            path = os.path.join(xdg, "river-wm", "config.toml")
+            path = os.path.join(xdg, "wm2", "config.toml")
         if os.path.isfile(path):
             try:
                 import tomllib
@@ -163,8 +165,11 @@ class Config:
                 cfg.launcher_cmd = data.get("launcher", cfg.launcher_cmd)
                 cfg.border_width = data.get("border_width", cfg.border_width)
                 cfg.bar_height = data.get("bar_height", cfg.bar_height)
-                cfg.xkb_layout = data.get("xkb_layout", cfg.xkb_layout)
-                cfg.xkb_options = data.get("xkb_options", cfg.xkb_options)
+                xkb = data.get("xkb", {})
+                cfg.xkb_layout = xkb.get("layout", cfg.xkb_layout)
+                cfg.xkb_model = xkb.get("model", cfg.xkb_model)
+                cfg.xkb_variant = xkb.get("variant", cfg.xkb_variant)
+                cfg.xkb_options = xkb.get("options", cfg.xkb_options)
                 layout_str = data.get("default_layout", cfg.default_layout.value)
                 cfg.default_layout = LayoutMode(layout_str)
                 logger.info("Loaded config from %s", path)
@@ -1453,17 +1458,23 @@ class RiverWM:
     def _apply_xkb_keymap(self):
         """Apply XKB keymap via river-xkb-config-v1 protocol at runtime."""
         if self.xkb_config_proxy is None:
-            if self.config.xkb_options or self.config.xkb_layout:
+            if self.config.xkb_layout or self.config.xkb_model or \
+               self.config.xkb_variant or self.config.xkb_options:
                 logger.warning("river_xkb_config_v1 not available; cannot apply XKB keymap")
             return
 
-        if not self.config.xkb_options and not self.config.xkb_layout:
+        if not any((self.config.xkb_layout, self.config.xkb_model,
+                     self.config.xkb_variant, self.config.xkb_options)):
             return
 
         # Build xkbcli command
         cmd = ["xkbcli", "compile-keymap"]
         if self.config.xkb_layout:
             cmd += ["--layout", self.config.xkb_layout]
+        if self.config.xkb_model:
+            cmd += ["--model", self.config.xkb_model]
+        if self.config.xkb_variant:
+            cmd += ["--variant", self.config.xkb_variant]
         if self.config.xkb_options:
             cmd += ["--options", self.config.xkb_options]
 
@@ -1492,8 +1503,10 @@ class RiverWM:
 
         def _on_keymap_success(proxy):
             self.xkb_keymap_obj = proxy
-            logger.info("Applied XKB keymap (layout=%s options=%s)",
+            logger.info("Applied XKB keymap (layout=%s model=%s variant=%s options=%s)",
                         self.config.xkb_layout or "(default)",
+                        self.config.xkb_model or "(default)",
+                        self.config.xkb_variant or "(default)",
                         self.config.xkb_options or "(default)")
             # Apply to any keyboards we already know about
             for kb in self.xkb_keyboards:
@@ -1570,7 +1583,7 @@ class RiverWM:
 
     def shutdown(self):
         """Clean shutdown."""
-        logger.info("Shutting down river-wm")
+        logger.info("Shutting down wm2")
         if self.wm_proxy:
             try:
                 self.wm_proxy.stop()

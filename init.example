@@ -1,12 +1,12 @@
 #!/bin/sh
 #
-# Example River init script for use with river-wm.
+# Example River init script for use with wm2.
 # Place this file at ~/.config/river/init and make it executable:
 #   chmod +x ~/.config/river/init
 #
 
-# Path to the river-wm installation
-RIVER_WM_DIR="${RIVER_WM_DIR:-$HOME/river-wm}"
+# Path to the wm2 installation
+RIVER_WM_DIR="${RIVER_WM_DIR:-$HOME/wm2}"
 
 # Set environment variables for child processes
 export XCURSOR_THEME="Adwaita"

@@ -1,4 +1,4 @@
-# river-wm
+# wm2
 
 A window manager for the [River](https://codeberg.org/river/river) Wayland compositor (v0.4+), written in Python 3. It implements the `river-window-management-v1` and `river-xkb-bindings-v1` protocols to provide an opinionated workflow with **4 desktops**, a **floating overlay stack**, and **3 layout modes**.
 
@@ -20,7 +20,7 @@ A window manager for the [River](https://codeberg.org/river/river) Wayland compo
 
 ## Requirements
 
-The following are required to run river-wm:
+The following are required to run wm2:
 
 - **River** compositor `main` branch (pre-0.4.0) or 0.4.0+ with `river-window-management-v1` protocol support
 - **Python 3.11+**
@@ -32,8 +32,8 @@ The following are required to run river-wm:
 
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/river-wm.git
-cd river-wm
+git clone https://github.com/YOUR_USERNAME/wm2.git
+cd wm2
 
 # Install Python dependencies
 pip install pywayland
@@ -53,11 +53,11 @@ chmod +x river_wm.py
 
 ## Usage
 
-river-wm is launched as part of your River init script. It connects to the Wayland display, binds the window management protocol, and enters its event loop.
+wm2 is launched as part of your River init script. It connects to the Wayland display, binds the window management protocol, and enters its event loop.
 
 ```bash
 # Launch directly (River must be running)
-python3 /path/to/river-wm/river_wm.py &
+python3 /path/to/wm2/river_wm.py &
 ```
 
 ### Sample River Init Script
@@ -68,7 +68,7 @@ Place the following in `~/.config/river/init` and make it executable:
 #!/bin/sh
 
 # Start the window manager
-python3 /path/to/river-wm/river_wm.py &
+python3 /path/to/wm2/river_wm.py &
 
 # Optional: start a status bar
 # waybar &
@@ -133,7 +133,7 @@ All bindings use the **Super** (Logo) key as the primary modifier.
 
 ## Configuration
 
-An optional TOML configuration file can be placed at `~/.config/river-wm/config.toml`. If the file does not exist, sensible defaults are used.
+An optional TOML configuration file can be placed at `~/.config/wm2/config.toml`. If the file does not exist, sensible defaults are used.
 
 ### Example Configuration
 
@@ -149,13 +149,19 @@ border_width = 2
 
 # Default layout mode: "fullscreen", "max", or "split"
 default_layout = "max"
+
+[xkb]
+layout = "us"
+model = "pc105"
+variant = "altgr-intl"
+options = "ctrl:nocaps,compose:rctrl"
 ```
 
 ## Architecture
 
 ```mermaid
 graph TD
-    A[River Compositor] <-->|river-window-management-v1| B[river-wm]
+    A[River Compositor] <-->|river-window-management-v1| B[wm2]
     A <-->|river-xkb-bindings-v1| B
     B --> C[Desktop 1]
     B --> D[Desktop 2]
@@ -179,7 +185,7 @@ This separation ensures frame-perfect atomic updates — all state changes are a
 ## Project Structure
 
 ```
-river-wm/
+wm2/
 ├── river_wm.py              # Main window manager implementation
 ├── protocols/                # Generated pywayland protocol bindings
 │   ├── river_window_management_v1/

@@ -1,5 +1,5 @@
-# river-wm configuration
-# Place this file at ~/.config/river-wm/config.toml
+# wm2 configuration
+# Place this file at ~/.config/wm2/config.toml
 
 # Terminal emulator command
 terminal = "foot"
@@ -14,11 +14,12 @@ border_width = 2
 # Options: "fullscreen", "max", "split"
 default_layout = "max"
 
-# XKB keyboard layout (e.g. "us", "se", "de")
+# XKB keyboard configuration
 # Applied at runtime via river-xkb-config-v1 protocol.
-# xkb_layout = "us"
-
-# XKB options (e.g. "ctrl:nocaps" to map CapsLock as Ctrl)
-# Applied at runtime via river-xkb-config-v1 protocol.
-# See xkeyboard-config(7) for all available options.
-xkb_options = "ctrl:nocaps"
+# Equivalent to: riverctl keyboard-layout -model pc105 -variant altgr-intl \
+#                  -options ctrl:nocaps,compose:rctrl us
+[xkb]
+layout = "us"
+model = "pc105"
+variant = "altgr-intl"
+options = "ctrl:nocaps,compose:rctrl"

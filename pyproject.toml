@@ -1,5 +1,5 @@
 [project]
-name = "river-wm"
+name = "wm2"
 version = "0.1.0"
 description = "A window manager for the River Wayland compositor (v0.4+)"
 readme = "README.md"
@@ -10,4 +10,4 @@ dependencies = [
 ]
 
 [project.scripts]
-river-wm = "river_wm:main"
+wm2 = "river_wm:main"
