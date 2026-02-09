@@ -1402,7 +1402,7 @@ class RiverWM:
         self._move_window_to_side(desktop, focused, side)
         self.wm_proxy.manage_dirty()
 
-    def _move_window_to_side(self, desktop: DesktopState, win: WindowState, side: Side):
+    def _move_window_to_side(self, desktop, win, side):
         if win in desktop.left_stack:
             desktop.left_stack.remove(win)
         if win in desktop.right_stack:
