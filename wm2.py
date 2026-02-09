@@ -885,7 +885,11 @@ class RiverWM:
             self.floating_stack.insert(0, win)
         else:
             win.desktop_id = target_desktop_id
-            self.desktops[target_desktop_id].add_window(win)
+            target = self.desktops[target_desktop_id]
+            if target.layout == LayoutMode.SPLIT:
+                target.ensure_window_in_split_stacks(win)
+            else:
+                target.add_window(win)
 
         self.needs_layout = True
 
