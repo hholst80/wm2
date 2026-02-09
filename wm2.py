@@ -551,10 +551,16 @@ class RiverWM:
 
     def _on_window_dimensions(self, win: WindowState, width: int, height: int):
         """Window dimensions event (render sequence)."""
+        changed = (win.width != width or win.height != height)
         win.width = width
         win.height = height
         win.pending_initial_dimensions = False
-        self.needs_layout = True
+        if changed:
+            self.needs_layout = True
+            # Re-assert tiled layout dimensions if a window changed size on its own
+            # (e.g. font size change, CSD resize attempt). This triggers a manage
+            # sequence that will re-propose the correct split/max dimensions.
+            self.wm_proxy.manage_dirty()
 
     def _on_window_dimensions_hint(self, win: WindowState, min_w, min_h, max_w, max_h):
         win.min_width = min_w
@@ -578,13 +584,13 @@ class RiverWM:
     def _on_pointer_move_requested(self, win: WindowState, seat_proxy):
         """Window requested interactive pointer move."""
         seat = self._find_seat(seat_proxy)
-        if seat and self.in_manage:
+        if seat and self.in_manage and win.desktop_id == 0:
             self._start_interactive_move(seat, win)
 
     def _on_pointer_resize_requested(self, win: WindowState, seat_proxy, edges):
         """Window requested interactive pointer resize."""
         seat = self._find_seat(seat_proxy)
-        if seat and self.in_manage:
+        if seat and self.in_manage and win.desktop_id == 0:
             self._start_interactive_resize(seat, win)
 
     # -------------------------------------------------------------------
@@ -775,6 +781,7 @@ class RiverWM:
             # Floating: half output size
             w = output.width // 2
             h = output.height // 2
+            win.proxy.set_tiled(EDGE_NONE)
             win.proxy.propose_dimensions(w, h)
             return
 
@@ -952,19 +959,22 @@ class RiverWM:
                     win.proxy.inform_not_fullscreen()
                     win.is_fullscreen = False
 
-        # Propose dimensions for visible windows
+        # Propose dimensions for visible windows and inform tiled state
         ua_x, ua_y, ua_w, ua_h = self._usable_area(output)
         if desktop.layout == LayoutMode.MAX:
             for win in desktop.windows:
                 if not win.closed:
+                    win.proxy.set_tiled(EDGE_ALL)
                     win.proxy.propose_dimensions(ua_w, ua_h)
         elif desktop.layout == LayoutMode.SPLIT:
             half_w = ua_w // 2
             left_visible = self._visible_top(desktop.left_stack)
             right_visible = self._visible_top(desktop.right_stack)
             if left_visible:
+                left_visible.proxy.set_tiled(EDGE_ALL)
                 left_visible.proxy.propose_dimensions(half_w, ua_h)
             if right_visible:
+                right_visible.proxy.set_tiled(EDGE_ALL)
                 right_visible.proxy.propose_dimensions(half_w, ua_h)
 
         # Set focus
