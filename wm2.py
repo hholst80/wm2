@@ -338,7 +338,10 @@ class Desktop:
 
     def migrate_from_split(self):
         """When switching from split mode, merge stacks into windows list."""
-        self.windows = list(self.left_stack) + list(self.right_stack)
+        if self.focused_side == Side.RIGHT:
+            self.windows = list(self.right_stack) + list(self.left_stack)
+        else:
+            self.windows = list(self.left_stack) + list(self.right_stack)
         self.focused_index = 0
 
 
@@ -1039,7 +1042,7 @@ class RiverWM:
                 win.proxy.hide()
 
     def _layout_max(self, desktop: Desktop, output: OutputState, focused: Optional[WindowState]):
-        """Max/monocle layout: one window visible at a time."""
+        """Max layout: one window visible at a time."""
         ua_x, ua_y, ua_w, ua_h = self._usable_area(output)
         for win in desktop.windows:
             if win.closed:
