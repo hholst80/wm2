@@ -12,9 +12,6 @@ WM2_DIR="${WM2_DIR:-$HOME/wm2}"
 export XCURSOR_THEME="Adwaita"
 export XCURSOR_SIZE=24
 
-# Start the window manager
-python3 "$WM2_DIR/wm2.py" &
-
 # Optional: start a status bar (e.g., waybar)
 # waybar &
 
@@ -29,3 +26,7 @@ python3 "$WM2_DIR/wm2.py" &
 #     timeout 300 'swaylock -f -c 000000' \
 #     timeout 600 'wlopm --off \*' \
 #     resume 'wlopm --on \*' &
+
+# Start wm2 — must be the last command, run in the foreground.
+# Using exec replaces this shell with wm2; same pattern as ~/.xinitrc.
+exec python3 "$WM2_DIR/wm2.py"

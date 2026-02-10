@@ -57,7 +57,7 @@ wm2 is launched as part of your River init script. It connects to the Wayland di
 
 ```bash
 # Launch directly (River must be running)
-python3 /path/to/wm2/wm2.py &
+python3 /path/to/wm2/wm2.py
 ```
 
 ### Sample River Init Script
@@ -67,14 +67,14 @@ Place the following in `~/.config/river/init` and make it executable:
 ```bash
 #!/bin/sh
 
-# Start the window manager
-python3 /path/to/wm2/wm2.py &
-
 # Optional: start a status bar
 # waybar &
 
 # Optional: set wallpaper
 # swaybg -i /path/to/wallpaper.png &
+
+# Start wm2 — must be the last command (same pattern as ~/.xinitrc)
+exec python3 /path/to/wm2/wm2.py
 ```
 
 ## Default Keymap
