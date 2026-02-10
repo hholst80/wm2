@@ -13,8 +13,8 @@ A window manager for the [River](https://codeberg.org/river/river) Wayland compo
 | Mode | Description |
 |------|-------------|
 | **Fullscreen** | The focused window occupies the entire output (no gaps, no borders, covers panels). Other windows are hidden behind it. Cycling windows changes which window is fullscreen. |
-| **Max** | The focused window occupies the entire usable area (respects panels/bars). Only one window is visible at a time — a monocle layout. |
-| **2-Split** | The output is divided into two equal horizontal halves (left 50%, right 50%). Each side has its own ordered stack; only the top window on each side is visible. New windows are auto-balanced to the empty side when the focused side already has a window. |
+| **Max** | The focused window occupies the entire usable area (respects panels/bars). Only one window is visible at a time. |
+| **2-Split** | The output is divided into a left and right stack separated by a vertical split. Each side has its own ordered stack; only the top window on each side is visible. New windows are auto-balanced to the empty side when the focused side already has a window. |
 
 **Focus Management.** Keyboard focus is explicitly managed by the WM. In max/fullscreen modes, focus is always on the single visible window. In 2-split mode, focus is on one of the two visible windows and can be moved between sides.
 
@@ -94,14 +94,14 @@ All bindings use the **Super** (Logo) key as the primary modifier.
 | `Super + Shift + 3` | Move focused window to desktop 3 |
 | `Super + Shift + 4` | Move focused window to desktop 4 |
 | `Super + Space` | Toggle floating overlay |
-| `Super + Shift + Space` | Move focused window to floating overlay |
+| `Super + Shift + Space` | Toggle focused window between floating and tiled |
 
 ### Layout Control
 
 | Keybinding | Action |
 |------------|--------|
 | `Super + F` | Switch to fullscreen mode |
-| `Super + M` | Switch to max (monocle) mode |
+| `Super + M` | Switch to max mode |
 | `Super + S` | Switch to 2-split mode |
 
 ### Window Navigation
@@ -111,6 +111,8 @@ All bindings use the **Super** (Logo) key as the primary modifier.
 | `Super + J` | Cycle to next window in stack |
 | `Super + K` | Cycle to previous window in stack |
 | `Super + Tab` | Move focus to other side (2-split mode) |
+| `Super + H` | Focus left side (2-split mode) |
+| `Super + L` | Focus right side (2-split mode) |
 | `Super + N` | Cycle window on current side (2-split mode) |
 
 ### Window Manipulation
@@ -118,9 +120,11 @@ All bindings use the **Super** (Logo) key as the primary modifier.
 | Keybinding | Action |
 |------------|--------|
 | `Super + O` | Move window to other side (2-split mode) |
+| `Super + Shift + Tab` | Move window to other side (2-split mode) |
+| `Super + Shift + H` | Move window to left stack (2-split mode) |
+| `Super + Shift + L` | Move window to right stack (2-split mode) |
 | `Super + Shift + K` | Move window up in side's stack (2-split mode) |
 | `Super + Shift + J` | Move window down in side's stack (2-split mode) |
-| `Super + Shift + Q` | Close focused window |
 
 ### General
 
@@ -128,6 +132,12 @@ All bindings use the **Super** (Logo) key as the primary modifier.
 |------------|--------|
 | `Super + Return` | Spawn terminal |
 | `Super + D` | Spawn application launcher |
+| `Super + P` | Spawn application launcher (alias) |
+| `Super + Q` | Close focused window |
+| `Super + Shift + R` | Restart / hot-reload WM |
+| `Super + G` | Screenshot region to clipboard |
+| `Super + Shift + G` | Screenshot region to file |
+| `Print` | Full screen screenshot to clipboard |
 | `Super + Left Click` | Interactive move (floating windows) |
 | `Super + Right Click` | Interactive resize (floating windows) |
 
@@ -192,6 +202,7 @@ wm2/
 │   ├── river_xkb_bindings_v1/
 │   ├── river_xkb_config_v1/
 │   ├── river_input_management_v1/
+│   ├── river_layer_shell_v1/
 │   └── wayland/
 ├── config.toml.example       # Example configuration file
 ├── init.example              # Example River init script
