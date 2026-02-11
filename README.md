@@ -18,6 +18,10 @@ A window manager for the [River](https://codeberg.org/river/river) Wayland compo
 
 **Focus Management.** Keyboard focus is explicitly managed by the WM. In max/fullscreen modes, focus is always on the single visible window. In 2-split mode, focus is on one of the two visible windows and can be moved between sides.
 
+**Wallpaper.** Built-in wallpaper rendering via `wlr-layer-shell`. Images are scaled (fill mode, center-crop) and rendered at the native physical pixel resolution of each output. Configure via `wallpaper` in `config.toml`. Requires Pillow.
+
+**Process Manager.** Managed child processes can be declared in `config.toml`. They are started after protocol binding and automatically restarted on crash with exponential backoff. Useful for status bars, notification daemons, and one-shot setup commands.
+
 ## Requirements
 
 The following are required to run wm2:
@@ -116,7 +120,8 @@ All bindings use the **Super** (Logo) key as the primary modifier.
 | `Super + Tab` | Move focus to other side (2-split mode) |
 | `Super + H` | Focus left side (2-split mode) |
 | `Super + L` | Focus right side (2-split mode) |
-| `Super + N` | Cycle window on current side (2-split mode) |
+| `Super + Shift + N` | Cycle window on current side (2-split mode) |
+| `Super + N` | Toggle notification panel |
 
 ### Window Manipulation
 
@@ -163,6 +168,9 @@ launcher = "fuzzel"
 # Border width in pixels (0 to disable)
 border_width = 2
 
+# Bar height in logical pixels (0 = auto-detect from waybar config)
+bar_height = 0
+
 # Default layout mode: "fullscreen", "max", or "split"
 default_layout = "max"
 
@@ -171,6 +179,14 @@ layout = "us"
 model = "pc105"
 variant = "altgr-intl"
 options = "ctrl:nocaps,compose:rctrl"
+
+# Managed processes — started after protocol binding, restarted on crash.
+# [[process]]
+# cmd = "waybar"
+#
+# [[process]]
+# cmd = "wlr-randr --output eDP-1 --scale 2"
+# restart = false
 ```
 
 ## Architecture
@@ -179,6 +195,9 @@ options = "ctrl:nocaps,compose:rctrl"
 graph TD
     A[River Compositor] <-->|river-window-management-v1| B[wm2]
     A <-->|river-xkb-bindings-v1| B
+    A <-->|river-xkb-config-v1| B
+    A <-->|river-layer-shell-v1| B
+    A <-->|wlr-layer-shell-unstable-v1| B
     B --> C[Desktop 1]
     B --> D[Desktop 2]
     B --> E[Desktop 3]

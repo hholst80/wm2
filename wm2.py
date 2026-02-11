@@ -85,7 +85,6 @@ XKB_KEY_o = 0x006f
 XKB_KEY_c = 0x0063
 XKB_KEY_d = 0x0064
 XKB_KEY_g = 0x0067
-XKB_KEY_r = 0x0072
 XKB_KEY_t = 0x0074
 XKB_KEY_Print = 0xFF61
 XKB_KEY_Return = 0xFF0D
@@ -115,18 +114,8 @@ EDGE_ALL = EDGE_TOP | EDGE_BOTTOM | EDGE_LEFT | EDGE_RIGHT
 
 # Border styling
 BORDER_WIDTH = 2
-BORDER_COLOR_FOCUSED = (0x5294e2ff >> 24, (0x5294e2ff >> 16) & 0xFF, (0x5294e2ff >> 8) & 0xFF, 0x5294e2ff & 0xFF)
-BORDER_COLOR_UNFOCUSED = (0x404552ff >> 24, (0x404552ff >> 16) & 0xFF, (0x404552ff >> 8) & 0xFF, 0x404552ff & 0xFF)
-
-# Recompute as 32-bit RGBA components for set_borders
-BORDER_FOCUSED_R = 0x52
-BORDER_FOCUSED_G = 0x94
-BORDER_FOCUSED_B = 0xE2
-BORDER_FOCUSED_A = 0xFF
-BORDER_UNFOCUSED_R = 0x40
-BORDER_UNFOCUSED_G = 0x45
-BORDER_UNFOCUSED_B = 0x52
-BORDER_UNFOCUSED_A = 0xFF
+_BORDER_FOCUSED = (0x52, 0x94, 0xE2, 0xFF)
+_BORDER_UNFOCUSED = (0x40, 0x45, 0x52, 0xFF)
 
 
 class LayoutMode(enum.Enum):
@@ -428,10 +417,6 @@ class WindowState:
     title: Optional[str] = None
     width: int = 0
     height: int = 0
-    min_width: int = 0
-    min_height: int = 0
-    max_width: int = 0
-    max_height: int = 0
     parent: Optional["WindowState"] = None
     desktop_id: int = 1  # 1-4 or 0 for floating overlay
     side: Side = Side.LEFT  # only meaningful in split mode
@@ -766,20 +751,12 @@ class RiverWM:
         # Register window event handlers
         window_proxy.dispatcher["closed"] = lambda p: self._on_window_closed(win)
         window_proxy.dispatcher["dimensions"] = lambda p, w, h: self._on_window_dimensions(win, w, h)
-        window_proxy.dispatcher["dimensions_hint"] = lambda p, minw, minh, maxw, maxh: self._on_window_dimensions_hint(win, minw, minh, maxw, maxh)
-        window_proxy.dispatcher["app_id"] = lambda p, aid: self._on_window_app_id(win, aid)
-        window_proxy.dispatcher["title"] = lambda p, t: self._on_window_title(win, t)
-        window_proxy.dispatcher["parent"] = lambda p, parent: self._on_window_parent(win, parent)
+        window_proxy.dispatcher["app_id"] = lambda p, aid: setattr(win, 'app_id', aid)
+        window_proxy.dispatcher["title"] = lambda p, t: setattr(win, 'title', t)
+        window_proxy.dispatcher["parent"] = lambda p, pp: setattr(win, 'parent', self.windows.get(id(pp)) if pp else None)
         window_proxy.dispatcher["decoration_hint"] = lambda p, hint: None  # ignore
         window_proxy.dispatcher["pointer_move_requested"] = lambda p, seat: self._on_pointer_move_requested(win, seat)
         window_proxy.dispatcher["pointer_resize_requested"] = lambda p, seat, edges: self._on_pointer_resize_requested(win, seat, edges)
-        window_proxy.dispatcher["maximize_requested"] = lambda p: None
-        window_proxy.dispatcher["unmaximize_requested"] = lambda p: None
-        window_proxy.dispatcher["fullscreen_requested"] = lambda p, output: None
-        window_proxy.dispatcher["exit_fullscreen_requested"] = lambda p: None
-        window_proxy.dispatcher["minimize_requested"] = lambda p: None
-        window_proxy.dispatcher["show_window_menu_requested"] = lambda p, x, y: None
-
         self.pending_new_windows.append(win)
         logger.info("New window created: %s", id(window_proxy))
 
@@ -801,36 +778,17 @@ class RiverWM:
             # sequence that will re-propose the correct split/max dimensions.
             self.wm_proxy.manage_dirty()
 
-    def _on_window_dimensions_hint(self, win: WindowState, min_w, min_h, max_w, max_h):
-        win.min_width = min_w
-        win.min_height = min_h
-        win.max_width = max_w
-        win.max_height = max_h
-
-    def _on_window_app_id(self, win: WindowState, app_id):
-        win.app_id = app_id
-
-    def _on_window_title(self, win: WindowState, title):
-        win.title = title
-
-    def _on_window_parent(self, win: WindowState, parent_proxy):
-        if parent_proxy is not None:
-            parent_win = self.windows.get(id(parent_proxy))
-            win.parent = parent_win
-        else:
-            win.parent = None
-
     def _on_pointer_move_requested(self, win: WindowState, seat_proxy):
         """Window requested interactive pointer move."""
         seat = self._find_seat(seat_proxy)
         if seat and self.in_manage and win.desktop_id == 0:
-            self._start_interactive_move(seat, win)
+            self._start_interactive_op(seat, win, "move")
 
     def _on_pointer_resize_requested(self, win: WindowState, seat_proxy, edges):
         """Window requested interactive pointer resize."""
         seat = self._find_seat(seat_proxy)
         if seat and self.in_manage and win.desktop_id == 0:
-            self._start_interactive_resize(seat, win)
+            self._start_interactive_op(seat, win, "resize")
 
     # -------------------------------------------------------------------
     # Output events
@@ -873,7 +831,7 @@ class RiverWM:
 
     def _on_wl_output_scale(self, proxy, factor):
         """Handle wl_output scale event — find matching OutputState and re-render wallpaper."""
-        for out in self.outputs.values():
+        for out in self.outputs:
             if out.wl_output is proxy:
                 if out.scale != factor:
                     out.scale = factor
@@ -1021,11 +979,9 @@ class RiverWM:
         seat_proxy.dispatcher["pointer_enter"] = lambda p, win: self._on_pointer_enter(seat, win)
         seat_proxy.dispatcher["pointer_leave"] = lambda p: self._on_pointer_leave(seat)
         seat_proxy.dispatcher["window_interaction"] = lambda p, win: self._on_window_interaction(seat, win)
-        seat_proxy.dispatcher["shell_surface_interaction"] = lambda p, ss: None
         seat_proxy.dispatcher["op_delta"] = lambda p, dx, dy: self._on_op_delta(seat, dx, dy)
         seat_proxy.dispatcher["op_release"] = lambda p: self._on_op_release(seat)
         seat_proxy.dispatcher["pointer_position"] = lambda p, x, y: self._on_pointer_position(seat, x, y)
-        seat_proxy.dispatcher["wl_seat"] = lambda p, name: None
 
         logger.info("New seat created")
 
@@ -1388,37 +1344,26 @@ class RiverWM:
 
     def _layout_desktop(self, desktop: Desktop, output: OutputState, focused: Optional[WindowState]):
         """Layout windows on the current desktop."""
-        if desktop.layout == LayoutMode.FULLSCREEN:
-            self._layout_fullscreen(desktop, output, focused)
-        elif desktop.layout == LayoutMode.MAX:
-            self._layout_max(desktop, output, focused)
-        elif desktop.layout == LayoutMode.SPLIT:
+        if desktop.layout == LayoutMode.SPLIT:
             self._layout_split(desktop, output, focused)
+        else:
+            self._layout_single(desktop, output, focused, with_borders=desktop.layout != LayoutMode.FULLSCREEN)
 
-    def _layout_fullscreen(self, desktop: Desktop, output: OutputState, focused: Optional[WindowState]):
-        """Fullscreen layout: focused window is fullscreen, others hidden."""
+    def _layout_single(self, desktop: Desktop, output: OutputState, focused: Optional[WindowState], with_borders: bool):
+        """Fullscreen/Max layout: focused window visible, others hidden."""
+        if with_borders:
+            ua_x, ua_y, ua_w, ua_h = self._usable_area(output)
         for win in desktop.windows:
             if win.closed:
                 continue
             if win == focused:
                 win.proxy.show()
                 if win.node:
+                    if with_borders:
+                        win.node.set_position(ua_x, ua_y)
                     win.node.place_top()
-            else:
-                win.proxy.hide()
-
-    def _layout_max(self, desktop: Desktop, output: OutputState, focused: Optional[WindowState]):
-        """Max layout: one window visible at a time."""
-        ua_x, ua_y, ua_w, ua_h = self._usable_area(output)
-        for win in desktop.windows:
-            if win.closed:
-                continue
-            if win == focused:
-                win.proxy.show()
-                if win.node:
-                    win.node.set_position(ua_x, ua_y)
-                    win.node.place_top()
-                self._set_borders(win, True)
+                if with_borders:
+                    self._set_borders(win, True)
             else:
                 win.proxy.hide()
 
@@ -1484,49 +1429,27 @@ class RiverWM:
         return None
 
     def _set_borders(self, win: WindowState, is_focused: bool):
-        """Set border styling for a window."""
         if self.config.border_width <= 0:
             return
-        if is_focused:
-            win.proxy.set_borders(
-                EDGE_ALL, self.config.border_width,
-                BORDER_FOCUSED_R, BORDER_FOCUSED_G, BORDER_FOCUSED_B, BORDER_FOCUSED_A
-            )
-        else:
-            win.proxy.set_borders(
-                EDGE_ALL, self.config.border_width,
-                BORDER_UNFOCUSED_R, BORDER_UNFOCUSED_G, BORDER_UNFOCUSED_B, BORDER_UNFOCUSED_A
-            )
+        c = _BORDER_FOCUSED if is_focused else _BORDER_UNFOCUSED
+        win.proxy.set_borders(EDGE_ALL, self.config.border_width, *c)
 
     # -------------------------------------------------------------------
     # Interactive move/resize
     # -------------------------------------------------------------------
-    def _start_interactive_move(self, seat: SeatState, win: WindowState):
-        """Start an interactive pointer move operation."""
+    def _start_interactive_op(self, seat: SeatState, win: WindowState, mode: str):
+        """Start an interactive pointer move or resize operation."""
         if seat.op_active:
             return
         seat.op_active = True
         seat.op_window = win
-        seat.op_mode = "move"
-        seat.op_dx = 0
-        seat.op_dy = 0
+        seat.op_mode = mode
+        seat.op_dx = seat.op_dy = 0
         seat.op_released = False
-        win.move_start_x = win.pos_x
-        win.move_start_y = win.pos_y
-        seat.proxy.op_start_pointer()
-
-    def _start_interactive_resize(self, seat: SeatState, win: WindowState):
-        """Start an interactive pointer resize operation."""
-        if seat.op_active:
-            return
-        seat.op_active = True
-        seat.op_window = win
-        seat.op_mode = "resize"
-        seat.op_dx = 0
-        seat.op_dy = 0
-        seat.op_released = False
-        win.move_start_x = win.width
-        win.move_start_y = win.height
+        if mode == "move":
+            win.move_start_x, win.move_start_y = win.pos_x, win.pos_y
+        else:
+            win.move_start_x, win.move_start_y = win.width, win.height
         seat.proxy.op_start_pointer()
 
     def _handle_interactive_op(self, seat: SeatState):
@@ -1580,75 +1503,55 @@ class RiverWM:
             self.pointer_bindings[id(binding)] = (binding, press_cb, release_cb)
             self.pending_bindings_to_enable.append(binding)
 
-        # --- Desktop management ---
-        bind_key(XKB_KEY_1, MOD_SUPER, lambda: self._action_switch_desktop(1))
-        bind_key(XKB_KEY_2, MOD_SUPER, lambda: self._action_switch_desktop(2))
-        bind_key(XKB_KEY_3, MOD_SUPER, lambda: self._action_switch_desktop(3))
-        bind_key(XKB_KEY_4, MOD_SUPER, lambda: self._action_switch_desktop(4))
+        S, SS = MOD_SUPER, MOD_SUPER | MOD_SHIFT
+        key_table = [
+            # Desktop switching & window moving
+            (XKB_KEY_1, S, "_action_switch_desktop", (1,)),
+            (XKB_KEY_2, S, "_action_switch_desktop", (2,)),
+            (XKB_KEY_3, S, "_action_switch_desktop", (3,)),
+            (XKB_KEY_4, S, "_action_switch_desktop", (4,)),
+            (XKB_KEY_1, SS, "_action_move_to_desktop", (1,)),
+            (XKB_KEY_2, SS, "_action_move_to_desktop", (2,)),
+            (XKB_KEY_3, SS, "_action_move_to_desktop", (3,)),
+            (XKB_KEY_4, SS, "_action_move_to_desktop", (4,)),
+            # Floating
+            (XKB_KEY_space, S, "_action_toggle_floating", ()),
+            (XKB_KEY_space, SS, "_action_move_to_floating", ()),
+            # Layout control
+            (XKB_KEY_f, S, "_action_set_layout", (LayoutMode.FULLSCREEN,)),
+            (XKB_KEY_m, S, "_action_set_layout", (LayoutMode.MAX,)),
+            (XKB_KEY_s, S, "_action_set_layout", (LayoutMode.SPLIT,)),
+            # Window navigation
+            (XKB_KEY_j, S, "_action_cycle_next", ()),
+            (XKB_KEY_k, S, "_action_cycle_prev", ()),
+            (XKB_KEY_Tab, S, "_action_focus_other_side", ()),
+            (XKB_KEY_h, S, "_action_focus_side", (Side.LEFT,)),
+            (XKB_KEY_l, S, "_action_focus_side", (Side.RIGHT,)),
+            (XKB_KEY_n, SS, "_action_cycle_side", ()),
+            (XKB_KEY_n, S, "_action_spawn", ("flatpak run --command=swaync-client sh.ironforge.swaync -t",)),
+            # Window manipulation
+            (XKB_KEY_o, S, "_action_move_to_other_side", ()),
+            (XKB_KEY_Tab, SS, "_action_move_to_other_side", ()),
+            (XKB_KEY_h, SS, "_action_move_to_side", (Side.LEFT,)),
+            (XKB_KEY_l, SS, "_action_move_to_side", (Side.RIGHT,)),
+            (XKB_KEY_k, SS, "_action_move_in_stack", (-1,)),
+            (XKB_KEY_j, SS, "_action_move_in_stack", (1,)),
+            (XKB_KEY_q, S, "_action_close_window", ()),
+            # General
+            (XKB_KEY_Return, S, "_action_spawn", (self.config.terminal_cmd,)),
+            (XKB_KEY_d, S, "_action_spawn", (self.config.launcher_cmd,)),
+            (XKB_KEY_p, S, "_action_spawn", (self.config.launcher_cmd,)),
+            (XKB_KEY_r, SS, "_action_restart_wm", ()),
+            # Screenshots
+            (XKB_KEY_g, S, "_action_screenshot_region", ()),
+            (XKB_KEY_g, SS, "_action_screenshot_region_file", ()),
+            (XKB_KEY_Print, 0, "_action_screenshot_full", ()),
+        ]
+        for keysym, mods, method, args in key_table:
+            bind_key(keysym, mods, lambda m=method, a=args: getattr(self, m)(*a))
 
-        bind_key(XKB_KEY_1, MOD_SUPER | MOD_SHIFT, lambda: self._action_move_to_desktop(1))
-        bind_key(XKB_KEY_2, MOD_SUPER | MOD_SHIFT, lambda: self._action_move_to_desktop(2))
-        bind_key(XKB_KEY_3, MOD_SUPER | MOD_SHIFT, lambda: self._action_move_to_desktop(3))
-        bind_key(XKB_KEY_4, MOD_SUPER | MOD_SHIFT, lambda: self._action_move_to_desktop(4))
-
-        # Toggle floating overlay
-        bind_key(XKB_KEY_space, MOD_SUPER, lambda: self._action_toggle_floating())
-
-        # Move window to floating
-        bind_key(XKB_KEY_space, MOD_SUPER | MOD_SHIFT, lambda: self._action_move_to_floating())
-
-        # --- Layout control ---
-        bind_key(XKB_KEY_f, MOD_SUPER, lambda: self._action_set_layout(LayoutMode.FULLSCREEN))
-        bind_key(XKB_KEY_m, MOD_SUPER, lambda: self._action_set_layout(LayoutMode.MAX))
-        bind_key(XKB_KEY_s, MOD_SUPER, lambda: self._action_set_layout(LayoutMode.SPLIT))
-
-        # --- Window navigation ---
-        bind_key(XKB_KEY_j, MOD_SUPER, lambda: self._action_cycle_next())
-        bind_key(XKB_KEY_k, MOD_SUPER, lambda: self._action_cycle_prev())
-
-        # 2-split: move focus to other side
-        bind_key(XKB_KEY_Tab, MOD_SUPER, lambda: self._action_focus_other_side())
-        bind_key(XKB_KEY_h, MOD_SUPER, lambda: self._action_focus_side(Side.LEFT))
-        bind_key(XKB_KEY_l, MOD_SUPER, lambda: self._action_focus_side(Side.RIGHT))
-
-        # 2-split: cycle window on current side
-        bind_key(XKB_KEY_n, MOD_SUPER | MOD_SHIFT, lambda: self._action_cycle_side())
-
-        # Toggle notification panel
-        bind_key(XKB_KEY_n, MOD_SUPER, lambda: self._action_spawn(
-            "flatpak run --command=swaync-client sh.ironforge.swaync -t"))
-
-        # --- Window manipulation ---
-        # 2-split: move window to other side
-        bind_key(XKB_KEY_o, MOD_SUPER, lambda: self._action_move_to_other_side())
-        bind_key(XKB_KEY_Tab, MOD_SUPER | MOD_SHIFT, lambda: self._action_move_to_other_side())
-        bind_key(XKB_KEY_h, MOD_SUPER | MOD_SHIFT, lambda: self._action_move_to_side(Side.LEFT))
-        bind_key(XKB_KEY_l, MOD_SUPER | MOD_SHIFT, lambda: self._action_move_to_side(Side.RIGHT))
-
-        # 2-split: move window up/down in stack
-        bind_key(XKB_KEY_k, MOD_SUPER | MOD_SHIFT, lambda: self._action_move_up_in_stack())
-        bind_key(XKB_KEY_j, MOD_SUPER | MOD_SHIFT, lambda: self._action_move_down_in_stack())
-
-        # Close window
-        bind_key(XKB_KEY_q, MOD_SUPER, lambda: self._action_close_window())
-
-        # --- General ---
-        bind_key(XKB_KEY_Return, MOD_SUPER, lambda: self._action_spawn(self.config.terminal_cmd))
-        bind_key(XKB_KEY_d, MOD_SUPER, lambda: self._action_spawn(self.config.launcher_cmd))
-        bind_key(XKB_KEY_p, MOD_SUPER, lambda: self._action_spawn(self.config.launcher_cmd))
-
-        # Restart WM (hot reload)
-        bind_key(XKB_KEY_r, MOD_SUPER | MOD_SHIFT, lambda: self._action_restart_wm())
-
-        # Screenshots: Super+G = region to clipboard, Super+Shift+G = region to file,
-        #              Print = full screen to clipboard
-        bind_key(XKB_KEY_g, MOD_SUPER, lambda: self._action_screenshot_region())
-        bind_key(XKB_KEY_g, MOD_SUPER | MOD_SHIFT, lambda: self._action_screenshot_region_file())
-        bind_key(XKB_KEY_Print, 0, lambda: self._action_screenshot_full())
-
-        # --- Pointer bindings for interactive move/resize ---
-        bind_pointer(BTN_LEFT, MOD_SUPER, lambda: self._action_pointer_move())
-        bind_pointer(BTN_RIGHT, MOD_SUPER, lambda: self._action_pointer_resize())
+        bind_pointer(BTN_LEFT, S, lambda: self._action_pointer_op("move"))
+        bind_pointer(BTN_RIGHT, S, lambda: self._action_pointer_op("resize"))
 
         # Request a manage sequence to enable bindings
         self.wm_proxy.manage_dirty()
@@ -1787,7 +1690,7 @@ class RiverWM:
             desktop.right_stack.insert(0, win)
         desktop.focused_side = side
 
-    def _action_move_up_in_stack(self):
+    def _action_move_in_stack(self, direction: int):
         desktop = self.current_desktop
         if desktop.layout != LayoutMode.SPLIT:
             return
@@ -1796,21 +1699,9 @@ class RiverWM:
         if focused is None or focused not in stack:
             return
         idx = stack.index(focused)
-        if idx > 0:
-            stack[idx], stack[idx - 1] = stack[idx - 1], stack[idx]
-        self.wm_proxy.manage_dirty()
-
-    def _action_move_down_in_stack(self):
-        desktop = self.current_desktop
-        if desktop.layout != LayoutMode.SPLIT:
-            return
-        stack = desktop.left_stack if desktop.focused_side == Side.LEFT else desktop.right_stack
-        focused = desktop.get_focused_window()
-        if focused is None or focused not in stack:
-            return
-        idx = stack.index(focused)
-        if idx < len(stack) - 1:
-            stack[idx], stack[idx + 1] = stack[idx + 1], stack[idx]
+        new_idx = idx + direction
+        if 0 <= new_idx < len(stack):
+            stack[idx], stack[new_idx] = stack[new_idx], stack[idx]
         self.wm_proxy.manage_dirty()
 
     def _action_close_window(self):
@@ -1830,25 +1721,15 @@ class RiverWM:
             logger.error("Failed to spawn %s: %s", cmd, e)
 
     def _action_screenshot_region(self):
-        """Region select → clipboard."""
-        subprocess.Popen("grim -g \"$(slurp)\" - | wl-copy -t image/png",
-                         shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        logger.info("Screenshot: region → clipboard")
+        self._action_spawn('grim -g "$(slurp)" - | wl-copy -t image/png')
 
     def _action_screenshot_region_file(self):
-        """Region select → file."""
-        import time
         os.makedirs(os.path.expanduser("~/Pictures"), exist_ok=True)
         path = os.path.expanduser(f"~/Pictures/screenshot-{int(time.time())}.png")
-        subprocess.Popen(f'grim -g "$(slurp)" {path}',
-                         shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        logger.info("Screenshot: region → %s", path)
+        self._action_spawn(f'grim -g "$(slurp)" {path}')
 
     def _action_screenshot_full(self):
-        """Full screen → clipboard."""
-        subprocess.Popen("grim - | wl-copy -t image/png",
-                         shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        logger.info("Screenshot: full → clipboard")
+        self._action_spawn("grim - | wl-copy -t image/png")
 
     def _action_restart_wm(self):
         """Hot-reload: terminate managed processes, clean shutdown, re-exec."""
@@ -1861,21 +1742,13 @@ class RiverWM:
         python = sys.executable
         os.execv(python, [python] + sys.argv)
 
-    def _action_pointer_move(self):
+    def _action_pointer_op(self, mode: str):
         if not self.seats:
             return
         seat = self.seats[0]
         win = seat.pointer_entered_window
-        if win and win.desktop_id == 0:  # Only for floating windows
-            self._start_interactive_move(seat, win)
-
-    def _action_pointer_resize(self):
-        if not self.seats:
-            return
-        seat = self.seats[0]
-        win = seat.pointer_entered_window
-        if win and win.desktop_id == 0:  # Only for floating windows
-            self._start_interactive_resize(seat, win)
+        if win and win.desktop_id == 0:
+            self._start_interactive_op(seat, win, mode)
 
     # -------------------------------------------------------------------
     # Helpers
@@ -1959,12 +1832,6 @@ class RiverWM:
             logger.info("XKB keyboard removed")
 
         keyboard_proxy.dispatcher["removed"] = _on_keyboard_removed
-        keyboard_proxy.dispatcher["input_device"] = lambda p, dev: None
-        keyboard_proxy.dispatcher["layout"] = lambda p, idx, name: None
-        keyboard_proxy.dispatcher["capslock_enabled"] = lambda p: None
-        keyboard_proxy.dispatcher["capslock_disabled"] = lambda p: None
-        keyboard_proxy.dispatcher["numlock_enabled"] = lambda p: None
-        keyboard_proxy.dispatcher["numlock_disabled"] = lambda p: None
 
         # If keymap already created, apply it to this keyboard
         if self.xkb_keymap_obj is not None:
