@@ -4,29 +4,10 @@
 # Place this file at ~/.config/river/init and make it executable:
 #   chmod +x ~/.config/river/init
 #
+# All processes (status bar, notification daemon, display scaling, portals)
+# are configured as managed processes in ~/.config/wm2/config.toml.
 
 # Path to the wm2 installation
 WM2_DIR="${WM2_DIR:-$HOME/wm2}"
 
-# Set environment variables for child processes
-export XCURSOR_THEME="Adwaita"
-export XCURSOR_SIZE=24
-
-# Optional: start a status bar (e.g., waybar)
-# waybar &
-
-# Optional: set a wallpaper
-# swaybg -i "$HOME/wallpaper.png" -m fill &
-
-# Optional: start a notification daemon
-# mako &
-
-# Optional: start an idle manager
-# swayidle -w \
-#     timeout 300 'swaylock -f -c 000000' \
-#     timeout 600 'wlopm --off \*' \
-#     resume 'wlopm --on \*' &
-
-# Start wm2 — must be the last command, run in the foreground.
-# Using exec replaces this shell with wm2; same pattern as ~/.xinitrc.
 exec python3 "$WM2_DIR/wm2.py"

@@ -73,16 +73,10 @@ Place the following in `~/.config/river/init` and make it executable:
 
 ```bash
 #!/bin/sh
-
-# Optional: start a status bar
-# waybar &
-
-# Optional: wallpaper can be set via config.toml (no swaybg needed)
-# wallpaper = "~/.config/river/bg.png"
-
-# Start wm2 — must be the last command (same pattern as ~/.xinitrc)
 exec python3 /path/to/wm2/wm2.py
 ```
+
+Everything else (status bar, notification daemon, display scaling, wallpaper, portals) is configured as managed processes in `config.toml`.
 
 ## Default Keymap
 
@@ -181,12 +175,19 @@ variant = "altgr-intl"
 options = "ctrl:nocaps,compose:rctrl"
 
 # Managed processes — started after protocol binding, restarted on crash.
+# One-shot commands (restart = false) run once after protocols are bound.
+# [[process]]
+# cmd = "wlr-randr --output eDP-1 --scale 2"
+# restart = false
+#
+# [[process]]
+# cmd = "/usr/libexec/xdg-desktop-portal"
+#
 # [[process]]
 # cmd = "waybar"
 #
 # [[process]]
-# cmd = "wlr-randr --output eDP-1 --scale 2"
-# restart = false
+# cmd = "swaync"
 ```
 
 ## Architecture
