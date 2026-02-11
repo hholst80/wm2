@@ -327,14 +327,25 @@ class Desktop:
         all_wins = list(self.windows)
         self.left_stack.clear()
         self.right_stack.clear()
-        for i, w in enumerate(all_wins):
-            if i % 2 == 0:
-                self.left_stack.append(w)
-                w.side = Side.LEFT
-            else:
-                self.right_stack.append(w)
-                w.side = Side.RIGHT
-        self.focused_side = Side.LEFT
+
+        has_left = any(w.side == Side.LEFT for w in all_wins)
+        has_right = any(w.side == Side.RIGHT for w in all_wins)
+
+        if has_left and has_right:
+            for w in all_wins:
+                if w.side == Side.LEFT:
+                    self.left_stack.append(w)
+                else:
+                    self.right_stack.append(w)
+        else:
+            for i, w in enumerate(all_wins):
+                if i % 2 == 0:
+                    self.left_stack.append(w)
+                    w.side = Side.LEFT
+                else:
+                    self.right_stack.append(w)
+                    w.side = Side.RIGHT
+            self.focused_side = Side.LEFT
 
     def migrate_from_split(self):
         """When switching from split mode, merge stacks into windows list."""
