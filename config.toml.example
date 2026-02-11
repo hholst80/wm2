@@ -7,6 +7,9 @@ terminal = "foot"
 # Application launcher command
 launcher = "fuzzel"
 
+# Wallpaper image path (PNG or JPEG). Empty or omitted = no wallpaper.
+# wallpaper = "~/.config/river/bg.png"
+
 # Border width in pixels (0 to disable borders)
 border_width = 2
 
@@ -23,3 +26,24 @@ layout = "us"
 model = "pc105"
 variant = "altgr-intl"
 options = "ctrl:nocaps,compose:rctrl"
+
+# Managed processes — started after protocol binding, restarted on crash.
+# Fields: cmd (required), restart (bool, default true),
+#         restart_delay (seconds, default 1.0), restart_max_delay (seconds, default 30.0)
+#
+# One-shot commands (restart = false) are useful for setup that must run
+# after wm2 has bound protocols (e.g. display scaling).
+#
+# [[process]]
+# cmd = "wlr-randr --output eDP-1 --scale 2"
+# restart = false
+#
+# [[process]]
+# cmd = "foot --server"
+#
+# [[process]]
+# cmd = "waybar"
+#
+# [[process]]
+# cmd = "swaync"
+# restart = false

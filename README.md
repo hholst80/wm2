@@ -25,6 +25,7 @@ The following are required to run wm2:
 - **River** compositor `main` branch (pre-0.4.0) or 0.4.0+ with `river-window-management-v1` protocol support
 - **Python 3.11+**
 - **pywayland** (`pip install pywayland`)
+- **Pillow** (`pip install Pillow`) — optional, required for wallpaper support
 - A Wayland-compatible terminal emulator (default: `foot`)
 - An application launcher (default: `fuzzel`)
 
@@ -41,10 +42,12 @@ pip install pywayland
 # Generate protocol bindings (already included, but can be regenerated)
 python3 -m pywayland.scanner \
   -i /usr/share/wayland/wayland.xml \
+     /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml \
      river-window-management-v1.xml \
      river-xkb-bindings-v1.xml \
      river-xkb-config-v1.xml \
      river-input-management-v1.xml \
+     wlr-layer-shell-unstable-v1.xml \
   -o protocols/
 
 # Make the main script executable
@@ -70,8 +73,8 @@ Place the following in `~/.config/river/init` and make it executable:
 # Optional: start a status bar
 # waybar &
 
-# Optional: set wallpaper
-# swaybg -i /path/to/wallpaper.png &
+# Optional: wallpaper can be set via config.toml (no swaybg needed)
+# wallpaper = "~/.config/river/bg.png"
 
 # Start wm2 — must be the last command (same pattern as ~/.xinitrc)
 exec python3 /path/to/wm2/wm2.py
@@ -154,6 +157,9 @@ terminal = "foot"
 # Application launcher command
 launcher = "fuzzel"
 
+# Wallpaper image path (PNG or JPEG). Empty or omitted = no wallpaper.
+# wallpaper = "~/.config/river/bg.png"
+
 # Border width in pixels (0 to disable)
 border_width = 2
 
@@ -203,6 +209,7 @@ wm2/
 │   ├── river_xkb_config_v1/
 │   ├── river_input_management_v1/
 │   ├── river_layer_shell_v1/
+│   ├── wlr_layer_shell_unstable_v1/
 │   └── wayland/
 ├── config.toml.example       # Example configuration file
 ├── init.example              # Example River init script

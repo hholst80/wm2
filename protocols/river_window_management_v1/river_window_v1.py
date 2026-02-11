@@ -52,7 +52,7 @@ class RiverWindowV1(Interface):
     """A logical window
 
     This represents a logical window. For example, a window may correspond to
-    an xdg_toplevel or Xwayland window.
+    an :class:`~pywayland.protocol.xdg_shell.XdgToplevel` or Xwayland window.
 
     A newly created window will not be displayed until the window manager
     proposes window dimensions with the propose_dimensions request as part of a
@@ -705,7 +705,8 @@ class RiverWindowV1Resource(Resource):
         """The window has been closed
 
         The window has been closed by the server, perhaps due to an
-        xdg_toplevel.close request or similar.
+        :func:`XdgToplevel.close()
+        <pywayland.protocol.xdg_shell.XdgToplevel.close>` request or similar.
 
         The server will send no further events on this object and ignore any
         request other than :func:`RiverWindowV1.destroy()` made after this
