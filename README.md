@@ -111,7 +111,6 @@ All bindings use the **Super** (Logo) key as the primary modifier.
 | `Super + Tab` | Move focus to other side (2-split mode) |
 | `Super + H` | Focus left side (2-split mode) |
 | `Super + L` | Focus right side (2-split mode) |
-| `Super + Shift + N` | Cycle window on current side (2-split mode) |
 | `Super + N` | Toggle notification panel |
 
 ### Window Manipulation
