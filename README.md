@@ -36,14 +36,14 @@ The following are required to run wm2:
 ## Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/YOUR_USERNAME/wm2.git
+git clone https://github.com/hholst80/wm2.git
 cd wm2
+pip install pywayland Pillow
+```
 
-# Install Python dependencies
-pip install pywayland
+Protocol bindings are checked in under `protocols/`. To regenerate them (only needed after protocol XML changes):
 
-# Generate protocol bindings (already included, but can be regenerated)
+```bash
 python3 -m pywayland.scanner \
   -i /usr/share/wayland/wayland.xml \
      /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml \
@@ -53,9 +53,6 @@ python3 -m pywayland.scanner \
      river-input-management-v1.xml \
      wlr-layer-shell-unstable-v1.xml \
   -o protocols/
-
-# Make the main script executable
-chmod +x wm2.py
 ```
 
 ## Usage
