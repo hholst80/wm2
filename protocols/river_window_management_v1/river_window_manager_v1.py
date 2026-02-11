@@ -118,7 +118,7 @@ class RiverWindowManagerV1(Interface):
     """
 
     name = "river_window_manager_v1"
-    version = 3
+    version = 4
 
     class error(enum.IntEnum):
         sequence_order = 0

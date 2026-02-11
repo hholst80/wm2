@@ -684,7 +684,7 @@ class RiverWM:
     def _on_global(self, registry, id_num, iface_name, version):
         """Handle wl_registry.global events to bind our protocol interfaces."""
         if iface_name == "river_window_manager_v1":
-            self.wm_proxy = registry.bind(id_num, RiverWindowManagerV1, min(version, 3))
+            self.wm_proxy = registry.bind(id_num, RiverWindowManagerV1, min(version, 4))
             self._setup_wm_events()
         elif iface_name == "river_xkb_bindings_v1":
             self.xkb_bindings_proxy = registry.bind(id_num, RiverXkbBindingsV1, min(version, 2))
@@ -757,6 +757,7 @@ class RiverWM:
         window_proxy.dispatcher["decoration_hint"] = lambda p, hint: None  # ignore
         window_proxy.dispatcher["pointer_move_requested"] = lambda p, seat: self._on_pointer_move_requested(win, seat)
         window_proxy.dispatcher["pointer_resize_requested"] = lambda p, seat, edges: self._on_pointer_resize_requested(win, seat, edges)
+        window_proxy.dispatcher["activation_requested"] = lambda p: self._on_activation_requested(win)
         self.pending_new_windows.append(win)
         logger.info("New window created: %s", id(window_proxy))
 
@@ -789,6 +790,15 @@ class RiverWM:
         seat = self._find_seat(seat_proxy)
         if seat and self.in_manage and win.desktop_id == 0:
             self._start_interactive_op(seat, win, "resize")
+
+    def _on_activation_requested(self, win: WindowState):
+        """Window requested activation (e.g. via xdg-activation)."""
+        if win.closed:
+            return
+        logger.info("Activation requested: app_id=%s title=%s", win.app_id, win.title)
+        seat = self.seats[0] if self.seats else None
+        if seat:
+            self._focus_window(seat, win)
 
     # -------------------------------------------------------------------
     # Output events
@@ -1972,6 +1982,10 @@ def main():
         level=logging.DEBUG,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         datefmt="%H:%M:%S",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler("/tmp/wm2.log", mode="w"),
+        ],
     )
 
     config = Config.load()

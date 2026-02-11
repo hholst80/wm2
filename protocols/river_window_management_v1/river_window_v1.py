@@ -61,7 +61,7 @@ class RiverWindowV1(Interface):
     """
 
     name = "river_window_v1"
-    version = 3
+    version = 4
 
     class error(enum.IntEnum):
         node_exists = 0
@@ -1076,6 +1076,23 @@ class RiverWindowV1Resource(Resource):
             `ArgumentType.Int`
         """
         self._post_event(15, unreliable_pid)
+
+    @RiverWindowV1.event(
+        version=4,
+    )
+    def activation_requested(self) -> None:
+        """The window requested to be activated
+
+        A client has requested that this window be activated, for example
+        via the xdg-activation protocol.
+
+        The window manager may use this to raise the window, focus it, or
+        ignore it entirely.
+
+        This event will be followed by a manage_start event after all other
+        new state has been sent by the server.
+        """
+        self._post_event(16)
 
 
 class RiverWindowV1Global(Global):
