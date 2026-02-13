@@ -214,6 +214,32 @@ The window manager operates as a standalone Wayland client process. It communica
 
 This separation ensures frame-perfect atomic updates — all state changes are applied together in a single frame.
 
+### Resize Jolt (Stuck Window Workaround)
+
+Some Wayland clients (notably Wine-based applications like Sober/Roblox) refuse to accept resize proposals before their first render on screen. When such a window starts, it ignores the WM's initial `propose_dimensions` and renders at its own default size (e.g. 800x637 instead of the expected tile size). Because the River compositor deduplicates identical proposals, simply re-proposing the same target dimensions has no effect — the compositor never sends a new configure event.
+
+The **resize jolt** works around this by proposing a size that differs by 1 pixel from the target after the window's first render. This forces the compositor to emit a new configure event, which the now-visible window accepts. The next manage cycle proposes the correct dimensions and the window stabilizes.
+
+The sequence for each layout mode:
+
+| Mode | Sequence |
+|------|----------|
+| **Split** | stuck at 800x637 → jolt to `half_w+1` → correct `half_w` (exact 50-50) |
+| **Max** | stuck at 800x637 → jolt to `ua_w-1` → correct `ua_w` |
+| **Fullscreen** | stuck at 0x0 (deferred, not fullscreened) → renders at 800x637 → jolt to `ua_w-1` → compositor fullscreens |
+
+For fullscreen mode, an additional **defer** step is needed: windows that haven't rendered yet (0x0) are not fullscreened immediately, since some clients won't render at all when fullscreened before their first frame. Instead, `propose_dimensions` is used (like max mode) until the window renders, then the jolt unsticks it, and fullscreen is applied on the following cycle.
+
+A 10-pixel tolerance prevents false-triggering on cell-aligned terminals (e.g. foot at 1919x1037 vs tile 1920x1038).
+
+### SIGUSR1 Hot-Reload
+
+Sending `SIGUSR1` to the wm2 process triggers a hot-reload (re-exec). This is equivalent to `Super + Shift + R`.
+
+```bash
+kill -USR1 $(pgrep -f 'python3.*wm2.py')
+```
+
 ## Project Structure
 
 ```

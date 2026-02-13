@@ -422,6 +422,7 @@ class WindowState:
     side: Side = Side.LEFT  # only meaningful in split mode
     is_fullscreen: bool = False
     pending_initial_dimensions: bool = True
+    needs_resize_jolt: bool = False  # propose current dims once to force new configure
     closed: bool = False
     # For interactive move/resize
     move_start_x: int = 0
@@ -769,9 +770,35 @@ class RiverWM:
     def _on_window_dimensions(self, win: WindowState, width: int, height: int):
         """Window dimensions event (render sequence)."""
         changed = (win.width != width or win.height != height)
+        logger.info("Window dimensions: app_id=%s %dx%d -> %dx%d (changed=%s, pending_initial=%s)",
+                     win.app_id, win.width, win.height, width, height, changed, win.pending_initial_dimensions)
         win.width = width
         win.height = height
+        was_pending = win.pending_initial_dimensions
         win.pending_initial_dimensions = False
+        # Some clients refuse to resize before their first render on screen.
+        # The compositor may deduplicate identical proposals, so repeated
+        # propose_dimensions(half_w) never generates a new configure.  After
+        # the window has rendered once at its default size, we jolt it by
+        # proposing full-width for one cycle — this forces a new configure
+        # event that the now-visible window can process.
+        if was_pending and changed and width > 0 and win.desktop_id > 0:
+            desktop = self.desktops.get(win.desktop_id)
+            output = self.primary_output
+            if desktop and output:
+                ua = self._usable_area(output)
+                if desktop.layout == LayoutMode.SPLIT:
+                    tile_w = ua[2] // 2
+                else:
+                    tile_w = ua[2]
+                # Use a tolerance to avoid false-triggering on cell-aligned
+                # windows (e.g. foot terminal at 1919x1037 vs tile 1920x1038).
+                threshold = 10
+                if width < tile_w - threshold or height < ua[3] - threshold:
+                    win.needs_resize_jolt = True
+                    logger.info("Window %s initial size %dx%d < tile %dx%d, scheduling jolt",
+                                win.app_id, width, height, tile_w, ua[3])
+                return
         if changed:
             self.needs_layout = True
             # Re-assert tiled layout dimensions if a window changed size on its own
@@ -1103,8 +1130,10 @@ class RiverWM:
             desktop.add_window(win)
             logger.info("Placed window on desktop %d", self.current_desktop_id)
 
-        # Propose initial dimensions
-        self._propose_window_dimensions(win)
+        # Propose initial dimensions only for floating windows; tiled windows
+        # get their dimensions from _apply_manage_state.
+        if win.desktop_id == 0:
+            self._propose_window_dimensions(win)
 
     def _propose_window_dimensions(self, win: WindowState):
         """Propose dimensions for a window based on its context."""
@@ -1118,6 +1147,7 @@ class RiverWM:
             h = output.height // 2
             win.proxy.set_tiled(EDGE_NONE)
             win.proxy.propose_dimensions(w, h)
+            logger.info("Proposed floating dimensions %dx%d for %s", w, h, win.app_id)
             return
 
         desktop = self.desktops[win.desktop_id]
@@ -1125,11 +1155,14 @@ class RiverWM:
         if desktop.layout == LayoutMode.FULLSCREEN:
             # Fullscreen: compositor handles dimensions
             win.proxy.propose_dimensions(output.width, output.height)
+            logger.info("Proposed fullscreen dimensions %dx%d for %s", output.width, output.height, win.app_id)
         elif desktop.layout == LayoutMode.MAX:
             win.proxy.propose_dimensions(output.width, output.height)
+            logger.info("Proposed max dimensions %dx%d for %s", output.width, output.height, win.app_id)
         elif desktop.layout == LayoutMode.SPLIT:
             ua_x, ua_y, ua_w, ua_h = self._usable_area(output)
             win.proxy.propose_dimensions(ua_w // 2, ua_h)
+            logger.info("Proposed split dimensions %dx%d for %s", ua_w // 2, ua_h, win.app_id)
 
     def _remove_window(self, win: WindowState):
         """Remove a window from all tracking structures."""
@@ -1278,9 +1311,27 @@ class RiverWM:
         # Apply fullscreen state for current desktop
         desktop = self.current_desktop
         if desktop.layout == LayoutMode.FULLSCREEN:
+            ua_x, ua_y, ua_w, ua_h = self._usable_area(output)
             for win in desktop.windows:
                 if not win.closed:
-                    if win == focused:
+                    if win.width == 0 and win.height == 0:
+                        # Window hasn't rendered yet — some clients (Wine/Sober)
+                        # won't render at all if fullscreened before their first
+                        # frame.  Use propose_dimensions like MAX mode to let
+                        # the client render, then fullscreen on a later cycle.
+                        win.proxy.set_tiled(EDGE_ALL)
+                        win.proxy.propose_dimensions(ua_w, ua_h)
+                        logger.debug("manage_state: FULLSCREEN defer, propose %dx%d for %s (no dims yet)",
+                                     ua_w, ua_h, win.app_id)
+                    elif win.needs_resize_jolt:
+                        # Unstick the window — propose a 1px-off size to force
+                        # a new configure, then fullscreen on the next cycle.
+                        jolt_w = ua_w - 1
+                        win.proxy.propose_dimensions(jolt_w, ua_h)
+                        win.needs_resize_jolt = False
+                        logger.debug("manage_state: FULLSCREEN JOLT propose %dx%d for %s (cur %dx%d)",
+                                     jolt_w, ua_h, win.app_id, win.width, win.height)
+                    elif win == focused:
                         if not win.is_fullscreen:
                             win.proxy.fullscreen(output.proxy)
                             win.proxy.inform_fullscreen()
@@ -1304,17 +1355,40 @@ class RiverWM:
             for win in desktop.windows:
                 if not win.closed:
                     win.proxy.set_tiled(EDGE_ALL)
-                    win.proxy.propose_dimensions(ua_w, ua_h)
+                    if win.needs_resize_jolt:
+                        jolt_w = ua_w - 1
+                        win.proxy.propose_dimensions(jolt_w, ua_h)
+                        win.needs_resize_jolt = False
+                        logger.debug("manage_state: MAX JOLT propose %dx%d for %s (cur %dx%d)",
+                                     jolt_w, ua_h, win.app_id, win.width, win.height)
+                    else:
+                        win.proxy.propose_dimensions(ua_w, ua_h)
+                        logger.debug("manage_state: MAX propose %dx%d for %s (cur %dx%d)",
+                                     ua_w, ua_h, win.app_id, win.width, win.height)
         elif desktop.layout == LayoutMode.SPLIT:
             half_w = ua_w // 2
             left_visible = self._visible_top(desktop.left_stack)
             right_visible = self._visible_top(desktop.right_stack)
-            if left_visible:
-                left_visible.proxy.set_tiled(EDGE_ALL)
-                left_visible.proxy.propose_dimensions(half_w, ua_h)
-            if right_visible:
-                right_visible.proxy.set_tiled(EDGE_ALL)
-                right_visible.proxy.propose_dimensions(half_w, ua_h)
+            for side, win in (("L", left_visible), ("R", right_visible)):
+                if win is None:
+                    continue
+                win.proxy.set_tiled(EDGE_ALL)
+                if win.needs_resize_jolt:
+                    # The compositor deduplicates identical proposals, so we
+                    # must propose a size different from BOTH the window's
+                    # current dimensions AND the previous proposal (half_w).
+                    # Using half_w+1 forces a new configure event with a
+                    # visually imperceptible 1-pixel difference; the next
+                    # manage cycle corrects to the exact half_w.
+                    jolt_w = half_w + 1
+                    win.proxy.propose_dimensions(jolt_w, ua_h)
+                    win.needs_resize_jolt = False
+                    logger.debug("manage_state: SPLIT-%s JOLT propose %dx%d for %s (cur %dx%d)",
+                                 side, jolt_w, ua_h, win.app_id, win.width, win.height)
+                else:
+                    win.proxy.propose_dimensions(half_w, ua_h)
+                    logger.debug("manage_state: SPLIT-%s propose %dx%d for %s (cur %dx%d)",
+                                 side, half_w, ua_h, win.app_id, win.width, win.height)
 
         # Set focus
         if seat and focused and not focused.closed:
@@ -1995,6 +2069,11 @@ def main():
     def sigterm_handler(signum, frame):
         wm.running = False
     signal.signal(signal.SIGTERM, sigterm_handler)
+
+    # SIGUSR1: hot-reload (re-exec)
+    def sigusr1_handler(signum, frame):
+        wm._action_restart_wm()
+    signal.signal(signal.SIGUSR1, sigusr1_handler)
 
     wm.run()
     sys.exit(1)
