@@ -55,8 +55,13 @@ from protocols.wlr_layer_shell_unstable_v1 import (
 )
 from protocols.wayland import (
     WlCompositor,
+    WlSeat,
     WlShm,
     WlOutput,
+)
+from pywayland.protocol.cursor_shape_v1 import (
+    WpCursorShapeManagerV1,
+    WpCursorShapeDeviceV1,
 )
 
 logger = logging.getLogger("wm2")
@@ -613,6 +618,13 @@ class RiverWM:
         self.layer_shell_bg_proxy = None  # ZwlrLayerShellV1 proxy
         self._wl_outputs: dict = {}    # global name -> WlOutput proxy
 
+        # Cursor shape (reset cursor when pointer enters wm2-owned surfaces)
+        self.wl_seat_proxy = None
+        self.wl_pointer_proxy = None
+        self.cursor_shape_mgr = None
+        self.cursor_shape_device = None
+        self._pointer_enter_serial = 0
+
         # State
         self.windows: dict = {}  # proxy id -> WindowState
         self.outputs: list = []  # list of OutputState
@@ -707,6 +719,13 @@ class RiverWM:
         elif iface_name == "zwlr_layer_shell_v1":
             self.layer_shell_bg_proxy = registry.bind(id_num, ZwlrLayerShellV1, min(version, 4))
             logger.info("Bound zwlr_layer_shell_v1 — wallpaper layer shell enabled")
+        elif iface_name == "wl_seat":
+            self.wl_seat_proxy = registry.bind(id_num, WlSeat, min(version, 1))
+            self.wl_seat_proxy.dispatcher["capabilities"] = self._on_wl_seat_capabilities
+            logger.info("Bound wl_seat — cursor reset enabled")
+        elif iface_name == "wp_cursor_shape_manager_v1":
+            self.cursor_shape_mgr = registry.bind(id_num, WpCursorShapeManagerV1, min(version, 1))
+            logger.info("Bound wp_cursor_shape_manager_v1")
 
     # -------------------------------------------------------------------
     # WM event handlers
@@ -897,6 +916,25 @@ class RiverWM:
         logger.info("Non-exclusive area: %d,%d %dx%d", x, y, w, h)
 
     # -------------------------------------------------------------------
+    # Cursor shape (reset to default on wm2-owned surfaces)
+    # -------------------------------------------------------------------
+    def _on_wl_seat_capabilities(self, proxy, capabilities):
+        """Handle wl_seat.capabilities to get a wl_pointer for cursor reset."""
+        if capabilities & WlSeat.capability.pointer and self.wl_pointer_proxy is None:
+            self.wl_pointer_proxy = self.wl_seat_proxy.get_pointer()
+            self.wl_pointer_proxy.dispatcher["enter"] = self._on_wl_pointer_enter
+            logger.info("Got wl_pointer for cursor reset")
+            if self.cursor_shape_mgr is not None:
+                self.cursor_shape_device = self.cursor_shape_mgr.get_pointer(self.wl_pointer_proxy)
+                logger.info("Created cursor shape device")
+
+    def _on_wl_pointer_enter(self, proxy, serial, surface, surface_x, surface_y):
+        """Pointer entered a wm2-owned surface — reset cursor to default."""
+        self._pointer_enter_serial = serial
+        if self.cursor_shape_device is not None:
+            self.cursor_shape_device.set_shape(serial, WpCursorShapeDeviceV1.shape.default)
+
+    # -------------------------------------------------------------------
     # Wallpaper rendering
     # -------------------------------------------------------------------
     def _recreate_wallpaper(self, out: OutputState):
@@ -913,6 +951,7 @@ class RiverWM:
     def _setup_wallpaper(self, out: OutputState):
         """Create a layer surface background wallpaper for an output."""
         if not self.config.wallpaper:
+            self._setup_black_background(out)
             return
         if self.layer_shell_bg_proxy is None or self.compositor_proxy is None or self.shm_proxy is None:
             return
@@ -1003,6 +1042,55 @@ class RiverWM:
         # Initial commit to trigger configure
         surface.commit()
         logger.info("Wallpaper layer surface created for output %dx%d (scale %d)", out.width, out.height, buf_scale)
+
+    def _setup_black_background(self, out: OutputState):
+        """Create a solid black background surface (default when no wallpaper)."""
+        if self.layer_shell_bg_proxy is None or self.compositor_proxy is None or self.shm_proxy is None:
+            return
+        if out.wl_output is None:
+            return
+
+        surface = self.compositor_proxy.create_surface()
+        out.bg_surface = surface
+
+        LAYER_BACKGROUND = ZwlrLayerShellV1.layer.background
+        layer_surface = self.layer_shell_bg_proxy.get_layer_surface(
+            surface, out.wl_output, LAYER_BACKGROUND, "wm2-bg"
+        )
+        out.bg_layer_surface = layer_surface
+
+        ANCHOR_ALL = (ZwlrLayerSurfaceV1.anchor.top |
+                      ZwlrLayerSurfaceV1.anchor.bottom |
+                      ZwlrLayerSurfaceV1.anchor.left |
+                      ZwlrLayerSurfaceV1.anchor.right)
+        layer_surface.set_anchor(ANCHOR_ALL)
+        layer_surface.set_size(0, 0)
+        layer_surface.set_exclusive_zone(-1)
+
+        def _on_configure(proxy, serial, conf_w, conf_h):
+            layer_surface.ack_configure(serial)
+            # 1x1 opaque black ARGB pixel
+            pixel = b'\x00\x00\x00\xff'
+            fd = os.memfd_create("wm2-bg")
+            os.ftruncate(fd, 4)
+            os.write(fd, pixel)
+            pool = self.shm_proxy.create_pool(fd, 4)
+            buf = pool.create_buffer(0, 1, 1, 4, WlShm.format.argb8888)
+            os.close(fd)
+            surface.attach(buf, 0, 0)
+            surface.damage(0, 0, 1, 1)
+            surface.commit()
+            pool.destroy()
+            logger.info("Black background surface created")
+
+        def _on_closed(proxy):
+            out.bg_layer_surface = None
+            out.bg_surface = None
+
+        layer_surface.dispatcher["configure"] = _on_configure
+        layer_surface.dispatcher["closed"] = _on_closed
+
+        surface.commit()
 
     # -------------------------------------------------------------------
     # Seat events
@@ -1973,6 +2061,9 @@ class RiverWM:
                 break
             except Exception as e:
                 logger.error("Error in event loop: %s", e, exc_info=True)
+                if isinstance(e, RuntimeError) and "error: 32" in str(e):
+                    logger.error("Display connection lost (EPIPE), exiting")
+                    break
                 continue
 
     def _run_poll_loop(self):
@@ -2031,6 +2122,10 @@ class RiverWM:
                     cancel_read(display_ptr_int)
                 except Exception:
                     pass
+                # EPIPE (errno 32) means the compositor connection is gone
+                if isinstance(e, RuntimeError) and "error: 32" in str(e):
+                    logger.error("Display connection lost (EPIPE), exiting")
+                    break
                 continue
 
     def shutdown(self):
