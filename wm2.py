@@ -136,6 +136,7 @@ class ProcessConfig:
     restart: bool = True
     restart_delay: float = 1.0
     restart_max_delay: float = 30.0
+    rerun_on_output: bool = False
 
 
 class Side(enum.Enum):
@@ -202,6 +203,7 @@ class Config:
                             restart=proc.get("restart", True),
                             restart_delay=proc.get("restart_delay", 1.0),
                             restart_max_delay=proc.get("restart_max_delay", 30.0),
+                            rerun_on_output=proc.get("rerun_on_output", False),
                         ))
                 logger.info("Loaded config from %s", path)
             except Exception as e:
@@ -359,6 +361,13 @@ class ProcessManager:
                     if next_at is None or t < next_at:
                         next_at = t
         return next_at
+
+    def run_output_triggered(self):
+        """Re-run exited processes that have rerun_on_output set."""
+        for mp in self._managed:
+            if mp.config.rerun_on_output and mp.proc is None:
+                logger.info("Output trigger: re-running %s", mp.config.cmd)
+                self._start(mp)
 
     def terminate_all(self):
         """SIGTERM all managed process groups, wait, then SIGKILL stragglers."""
@@ -617,6 +626,8 @@ class RiverWM:
         self.shm_proxy = None          # WlShm proxy
         self.layer_shell_bg_proxy = None  # ZwlrLayerShellV1 proxy
         self._wl_outputs: dict = {}    # global name -> WlOutput proxy
+        self._wl_output_names: dict = {}  # id(WlOutput proxy) -> connector name
+        self._initial_outputs_done: bool = False
 
         # Cursor shape (reset cursor when pointer enters wm2-owned surfaces)
         self.wl_seat_proxy = None
@@ -715,6 +726,8 @@ class RiverWM:
         elif iface_name == "wl_output":
             wl_out = registry.bind(id_num, WlOutput, min(version, 4))
             wl_out.dispatcher["scale"] = self._on_wl_output_scale
+            wl_out.dispatcher["name"] = self._on_wl_output_name
+            wl_out.dispatcher["done"] = self._on_wl_output_done
             self._wl_outputs[id_num] = wl_out
         elif iface_name == "zwlr_layer_shell_v1":
             self.layer_shell_bg_proxy = registry.bind(id_num, ZwlrLayerShellV1, min(version, 4))
@@ -884,6 +897,18 @@ class RiverWM:
         wl_out = self._wl_outputs.get(name)
         if wl_out is not None:
             out.wl_output = wl_out
+
+    def _on_wl_output_name(self, proxy, name):
+        """Handle wl_output.name — store connector name (e.g. 'eDP-1')."""
+        self._wl_output_names[id(proxy)] = name
+        logger.info("wl_output name: %s", name)
+
+    def _on_wl_output_done(self, proxy):
+        """Handle wl_output.done — re-run output-triggered processes after startup."""
+        name = self._wl_output_names.get(id(proxy), "?")
+        if self._initial_outputs_done and self.process_manager is not None:
+            logger.info("Output done event for %s (post-startup), firing output triggers", name)
+            self.process_manager.run_output_triggered()
 
     def _on_wl_output_scale(self, proxy, factor):
         """Handle wl_output scale event — find matching OutputState and re-render wallpaper."""
@@ -2036,6 +2061,11 @@ class RiverWM:
             self.process_manager = ProcessManager(self.config.processes)
             self.process_manager.setup_sigchld_pipe()
             self.process_manager.start_all()
+
+        # Initial wl_output.done events have already been processed by the
+        # roundtrips above.  From here on, any new done event means a monitor
+        # was (re-)connected and output-triggered processes should re-run.
+        self._initial_outputs_done = True
 
         logger.info("Entering main event loop")
 

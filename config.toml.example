@@ -29,14 +29,19 @@ options = "ctrl:nocaps,compose:rctrl"
 
 # Managed processes — started after protocol binding, restarted on crash.
 # Fields: cmd (required), restart (bool, default true),
-#         restart_delay (seconds, default 1.0), restart_max_delay (seconds, default 30.0)
+#         restart_delay (seconds, default 1.0), restart_max_delay (seconds, default 30.0),
+#         rerun_on_output (bool, default false)
 #
 # One-shot commands (restart = false) are useful for setup that must run
 # after wm2 has bound protocols (e.g. display scaling).
 #
+# Set rerun_on_output = true to re-run a one-shot command whenever a monitor
+# is reconnected or wakes from DPMS (the wl_output global is re-advertised).
+#
 # [[process]]
 # cmd = "wlr-randr --output eDP-1 --scale 2"
 # restart = false
+# rerun_on_output = true
 #
 # [[process]]
 # cmd = "foot --server"

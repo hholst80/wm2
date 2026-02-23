@@ -20,7 +20,7 @@ A window manager for the [River](https://codeberg.org/river/river) Wayland compo
 
 **Wallpaper.** Built-in wallpaper rendering via `wlr-layer-shell`. Images are scaled (fill mode, center-crop) and rendered at the native physical pixel resolution of each output. Configure via `wallpaper` in `config.toml`. Requires Pillow.
 
-**Process Manager.** Managed child processes can be declared in `config.toml`. They are started after protocol binding and automatically restarted on crash with exponential backoff. Useful for status bars, notification daemons, and one-shot setup commands.
+**Process Manager.** Managed child processes can be declared in `config.toml`. They are started after protocol binding and automatically restarted on crash with exponential backoff. One-shot commands can set `rerun_on_output = true` to automatically re-run whenever a monitor is reconnected or wakes from DPMS — useful for display scaling (`wlr-randr`) and other output setup.
 
 ## Requirements
 
@@ -172,9 +172,11 @@ options = "ctrl:nocaps,compose:rctrl"
 
 # Managed processes — started after protocol binding, restarted on crash.
 # One-shot commands (restart = false) run once after protocols are bound.
+# Set rerun_on_output = true to re-run on monitor reconnect/wake.
 # [[process]]
 # cmd = "wlr-randr --output eDP-1 --scale 2"
 # restart = false
+# rerun_on_output = true
 #
 # [[process]]
 # cmd = "/usr/libexec/xdg-desktop-portal"
