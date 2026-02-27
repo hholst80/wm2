@@ -1721,7 +1721,7 @@ class RiverWM:
             # Window navigation
             (XKB_KEY_j, S, "_action_cycle_next", ()),
             (XKB_KEY_k, S, "_action_cycle_prev", ()),
-            (XKB_KEY_Tab, S, "_action_focus_other_side", ()),
+            (XKB_KEY_Tab, S, "_action_cycle_next", ()),
             (XKB_KEY_h, S, "_action_focus_side", (Side.LEFT,)),
             (XKB_KEY_l, S, "_action_focus_side", (Side.RIGHT,)),
             (XKB_KEY_n, S, "_action_spawn", ("flatpak run --command=swaync-client sh.ironforge.swaync -t",)),

@@ -108,7 +108,7 @@ All bindings use the **Super** (Logo) key as the primary modifier.
 |------------|--------|
 | `Super + J` | Cycle to next window in stack |
 | `Super + K` | Cycle to previous window in stack |
-| `Super + Tab` | Move focus to other side (2-split mode) |
+| `Super + Tab` | Cycle to next window in stack (alias of `Super + J`) |
 | `Super + H` | Focus left side (2-split mode) |
 | `Super + L` | Focus right side (2-split mode) |
 | `Super + N` | Toggle notification panel |
