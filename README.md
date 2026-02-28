@@ -249,6 +249,8 @@ A 10-pixel tolerance prevents false-triggering on cell-aligned terminals (e.g. f
 
 Sending `SIGUSR1` to the wm2 process triggers a hot-reload (re-exec). This is equivalent to `Super + Shift + R`.
 
+On hot-reload, the WM serializes its state (desktop assignments, layout modes, window positions, floating stack) to a JSON file in `$XDG_RUNTIME_DIR` and re-adopts persistent managed processes by PID instead of restarting them. When the new instance starts, it restores each window to its previous desktop and layout position as the compositor re-advertises them.
+
 ```bash
 kill -USR1 $(pgrep -f 'python3.*wm2.py')
 ```

@@ -12,6 +12,7 @@ License: MIT
 import ctypes
 import ctypes.util
 import enum
+import json
 import logging
 import os
 import select
@@ -19,6 +20,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -65,6 +67,73 @@ from pywayland.protocol.cursor_shape_v1 import (
 )
 
 logger = logging.getLogger("wm2")
+
+
+# ---------------------------------------------------------------------------
+# Restart state persistence helpers
+# ---------------------------------------------------------------------------
+def _state_file_path() -> str:
+    """Return path to the restart state file."""
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+    return os.path.join(runtime_dir, "wm2-restart-state.json")
+
+
+def _save_state(wm, managed_pids: Optional[dict] = None) -> None:
+    """Serialize WM state to JSON before re-exec."""
+    desktops = {}
+    for did, desktop in wm.desktops.items():
+        win_entries = [{"app_id": w.app_id, "title": w.title} for w in desktop.windows]
+        left_entries = [{"app_id": w.app_id, "title": w.title, "side": "left"} for w in desktop.left_stack]
+        right_entries = [{"app_id": w.app_id, "title": w.title, "side": "right"} for w in desktop.right_stack]
+        desktops[str(did)] = {
+            "layout": desktop.layout.value,
+            "focused_index": desktop.focused_index,
+            "focused_side": desktop.focused_side.value,
+            "windows": win_entries,
+            "left_stack": left_entries,
+            "right_stack": right_entries,
+        }
+    floating = [
+        {"app_id": w.app_id, "title": w.title, "pos_x": w.pos_x, "pos_y": w.pos_y}
+        for w in wm.floating_stack
+    ]
+    state = {
+        "version": 1,
+        "current_desktop_id": wm.current_desktop_id,
+        "floating_active": wm.floating_active,
+        "desktops": desktops,
+        "floating_stack": floating,
+    }
+    if managed_pids:
+        state["managed_pids"] = managed_pids
+    path = _state_file_path()
+    try:
+        with open(path, "w") as f:
+            json.dump(state, f)
+        logger.info("Saved restart state to %s", path)
+    except OSError as e:
+        logger.error("Failed to save restart state: %s", e)
+
+
+def _load_state() -> Optional[dict]:
+    """Load restart state from JSON file, delete file, return dict or None."""
+    path = _state_file_path()
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r") as f:
+            state = json.load(f)
+        os.unlink(path)
+        logger.info("Loaded restart state from %s", path)
+        return state
+    except (OSError, json.JSONDecodeError) as e:
+        logger.error("Failed to load restart state: %s", e)
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        return None
+
 
 # ---------------------------------------------------------------------------
 # XKB keysym constants (from xkbcommon-keysyms.h)
@@ -261,6 +330,13 @@ class Config:
 # ---------------------------------------------------------------------------
 # Process manager
 # ---------------------------------------------------------------------------
+class _AdoptedProcess:
+    """Lightweight stand-in for subprocess.Popen for re-adopted PIDs."""
+    def __init__(self, pid):
+        self.pid = pid
+        self.returncode = None
+
+
 class ProcessManager:
     """Manages child processes with SIGCHLD-driven restart and exponential backoff."""
 
@@ -301,12 +377,31 @@ class ProcessManager:
     def pipe_fd(self):
         return self._pipe_r
 
+    def adopt_pids(self, saved: dict):
+        """Re-adopt surviving PIDs from a previous hot-reload.
+
+        saved: mapping of cmd string to PID.
+        """
+        for mp in self._managed:
+            pid = saved.get(mp.config.cmd)
+            if pid is None:
+                continue
+            try:
+                os.kill(pid, 0)  # probe — doesn't send a signal
+            except OSError:
+                logger.info("Saved PID %d for %s is dead, will re-launch", pid, mp.config.cmd)
+                continue
+            mp.proc = _AdoptedProcess(pid)
+            logger.info("Re-adopted managed process: %s (pid=%d)", mp.config.cmd, pid)
+
     def start_all(self):
         """Spawn all configured processes."""
         for mp in self._managed:
             self._start(mp)
 
     def _start(self, mp):
+        if mp.proc is not None:
+            return  # already running or adopted
         try:
             mp.proc = subprocess.Popen(
                 mp.config.cmd, shell=True,
@@ -414,6 +509,46 @@ class ProcessManager:
                 except ChildProcessError:
                     pass
                 mp.proc = None
+
+    def terminate_non_persistent(self) -> dict:
+        """Kill only non-restart processes; return {cmd: pid} for survivors."""
+        to_kill = [mp for mp in self._managed if mp.proc is not None and not mp.config.restart]
+
+        for mp in to_kill:
+            try:
+                os.killpg(mp.proc.pid, signal.SIGTERM)
+            except OSError:
+                pass
+
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            still = [mp for mp in to_kill if mp.proc is not None]
+            if not still:
+                break
+            for mp in still:
+                try:
+                    pid, _ = os.waitpid(mp.proc.pid, os.WNOHANG)
+                    if pid != 0:
+                        mp.proc = None
+                except ChildProcessError:
+                    mp.proc = None
+            time.sleep(0.05)
+
+        for mp in to_kill:
+            if mp.proc is not None:
+                try:
+                    os.killpg(mp.proc.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                try:
+                    os.waitpid(mp.proc.pid, 0)
+                except ChildProcessError:
+                    pass
+                mp.proc = None
+
+        # Return surviving persistent processes
+        return {mp.config.cmd: mp.proc.pid
+                for mp in self._managed if mp.proc is not None}
 
     def close_pipe(self):
         """Restore the old wakeup fd and close the pipe."""
@@ -672,6 +807,12 @@ class RiverWM:
 
         # Process management
         self.process_manager: Optional[ProcessManager] = None
+        self._saved_managed_pids: Optional[dict] = None
+
+        # Restart state restoration
+        self._saved_state: Optional[dict] = None
+        self._saved_state_idle_cycles: int = 0
+        self._saved_match_index: Optional[dict] = None
 
         self.running = True
 
@@ -1193,10 +1334,22 @@ class RiverWM:
             logger.info("Window removed successfully")
 
         # Place new windows
+        had_new_windows = bool(self.pending_new_windows)
         for win in self.pending_new_windows:
             if not win.closed:
                 self._place_new_window(win)
         self.pending_new_windows.clear()
+
+        # Track idle cycles for restart state cleanup
+        if self._saved_state is not None:
+            if not had_new_windows:
+                self._saved_state_idle_cycles += 1
+                if self._saved_state_idle_cycles >= 2:
+                    self._saved_state = None
+                    self._saved_match_index = None
+                    logger.info("Restart state consumed")
+            else:
+                self._saved_state_idle_cycles = 0
 
         # Enable pending bindings
         for binding in self.pending_bindings_to_enable:
@@ -1231,12 +1384,115 @@ class RiverWM:
         logger.debug("<<< render_finish")
 
     # -------------------------------------------------------------------
+    # Restart state restoration
+    # -------------------------------------------------------------------
+    def _load_restart_state(self, state: dict):
+        """Apply non-window state from a restart state dict."""
+        self.current_desktop_id = state.get("current_desktop_id", 1)
+        self.floating_active = state.get("floating_active", False)
+        for did_str, dstate in state.get("desktops", {}).items():
+            did = int(did_str)
+            desktop = self.desktops.get(did)
+            if desktop is None:
+                continue
+            layout_val = dstate.get("layout")
+            if layout_val:
+                try:
+                    desktop.layout = LayoutMode(layout_val)
+                except ValueError:
+                    pass
+            desktop.focused_index = dstate.get("focused_index", 0)
+            side_val = dstate.get("focused_side")
+            if side_val:
+                try:
+                    desktop.focused_side = Side(side_val)
+                except ValueError:
+                    pass
+        self._saved_state = state
+        self._saved_state_idle_cycles = 0
+        self._saved_match_index = None
+        logger.info("Applied restart state (desktop=%d, floating=%s)",
+                     self.current_desktop_id, self.floating_active)
+
+    def _match_saved_window(self, win: WindowState) -> Optional[dict]:
+        """Match a window against saved state entries; returns entry or None."""
+        if self._saved_state is None:
+            return None
+        # Lazily build match index on first call
+        if self._saved_match_index is None:
+            idx = defaultdict(list)
+            # Index desktop windows
+            for did_str, dstate in self._saved_state.get("desktops", {}).items():
+                did = int(did_str)
+                for entry in dstate.get("windows", []):
+                    e = dict(entry, desktop_id=did, source="windows")
+                    idx[(entry.get("app_id"), entry.get("title"))].append(e)
+                for entry in dstate.get("left_stack", []):
+                    e = dict(entry, desktop_id=did, source="left_stack")
+                    idx[(entry.get("app_id"), entry.get("title"))].append(e)
+                for entry in dstate.get("right_stack", []):
+                    e = dict(entry, desktop_id=did, source="right_stack")
+                    idx[(entry.get("app_id"), entry.get("title"))].append(e)
+            # Index floating windows
+            for entry in self._saved_state.get("floating_stack", []):
+                e = dict(entry, desktop_id=0, source="floating")
+                idx[(entry.get("app_id"), entry.get("title"))].append(e)
+            self._saved_match_index = idx
+        key = (win.app_id, win.title)
+        entries = self._saved_match_index.get(key)
+        if entries:
+            return entries.pop(0)
+        return None
+
+    def _restore_window_from_saved(self, win: WindowState, saved: dict):
+        """Place a window according to saved state entry."""
+        did = saved["desktop_id"]
+        source = saved["source"]
+        if did == 0 or source == "floating":
+            # Floating window
+            win.desktop_id = 0
+            self.floating_stack.append(win)
+            win.pos_x = saved.get("pos_x", 0)
+            win.pos_y = saved.get("pos_y", 0)
+            logger.info("Restored floating window %s/%s at (%d,%d)",
+                        win.app_id, win.title, win.pos_x, win.pos_y)
+        else:
+            desktop = self.desktops.get(did)
+            if desktop is None:
+                desktop = self.desktops[1]
+                did = 1
+            win.desktop_id = did
+            if source == "left_stack":
+                win.side = Side.LEFT
+                desktop.left_stack.append(win)
+                logger.info("Restored window %s/%s on desktop %d left_stack",
+                            win.app_id, win.title, did)
+            elif source == "right_stack":
+                win.side = Side.RIGHT
+                desktop.right_stack.append(win)
+                logger.info("Restored window %s/%s on desktop %d right_stack",
+                            win.app_id, win.title, did)
+            else:
+                # MAX or FULLSCREEN layout — use windows list
+                desktop.windows.append(win)
+                logger.info("Restored window %s/%s on desktop %d windows",
+                            win.app_id, win.title, did)
+
+    # -------------------------------------------------------------------
     # Window placement
     # -------------------------------------------------------------------
     def _place_new_window(self, win: WindowState):
         """Place a newly created window on the appropriate desktop/stack."""
         output = self.primary_output
         if output is None:
+            return
+
+        # Check for saved restart state match
+        saved = self._match_saved_window(win)
+        if saved is not None:
+            self._restore_window_from_saved(win, saved)
+            if win.desktop_id == 0:
+                self._propose_window_dimensions(win)
             return
 
         if self.floating_active:
@@ -1945,12 +2201,14 @@ class RiverWM:
         self._action_spawn("grim - | wl-copy -t image/png")
 
     def _action_restart_wm(self):
-        """Hot-reload: terminate managed processes, clean shutdown, re-exec."""
+        """Hot-reload: keep persistent processes alive, re-exec."""
         logger.info("Hot-reloading WM (re-exec)...")
+        managed_pids = None
         if self.process_manager:
-            self.process_manager.terminate_all()
+            managed_pids = self.process_manager.terminate_non_persistent()
             self.process_manager.close_pipe()
             self.process_manager = None
+        _save_state(self, managed_pids=managed_pids)
         self.shutdown()
         python = sys.executable
         os.execv(python, [python] + sys.argv)
@@ -2077,6 +2335,9 @@ class RiverWM:
         if self.config.processes:
             self.process_manager = ProcessManager(self.config.processes)
             self.process_manager.setup_sigchld_pipe()
+            if self._saved_managed_pids:
+                self.process_manager.adopt_pids(self._saved_managed_pids)
+                self._saved_managed_pids = None
             self.process_manager.start_all()
 
         # Initial wl_output.done events have already been processed by the
@@ -2206,6 +2467,12 @@ def main():
 
     config = Config.load()
     wm = RiverWM(config)
+
+    # Restore state from a previous hot-reload if available
+    saved_state = _load_state()
+    if saved_state is not None:
+        wm._load_restart_state(saved_state)
+        wm._saved_managed_pids = saved_state.get("managed_pids")
 
     # Handle SIGTERM gracefully
     def sigterm_handler(signum, frame):
