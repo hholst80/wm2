@@ -97,6 +97,9 @@ XKB_KEY_Tab = 0xFF09
 XKB_KEY_space = 0x0020
 XKB_KEY_comma = 0x002c
 XKB_KEY_period = 0x002e
+XKB_KEY_XF86AudioRaiseVolume = 0x1008FF13
+XKB_KEY_XF86AudioLowerVolume = 0x1008FF11
+XKB_KEY_XF86AudioMute = 0x1008FF12
 
 # Linux input event codes for pointer buttons
 BTN_LEFT = 0x110
@@ -160,6 +163,9 @@ class Config:
     xkb_variant: str = ""   # [xkb] variant (e.g. "dvorak"), empty = don't touch
     xkb_options: str = ""   # [xkb] options (e.g. "ctrl:nocaps"), empty = don't touch
     wallpaper: str = ""     # path to wallpaper image, empty = no wallpaper
+    volume_up: str = "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+"
+    volume_down: str = "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"
+    volume_mute: str = "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
     processes: list = field(default_factory=list)  # list of ProcessConfig
 
     @classmethod
@@ -191,6 +197,10 @@ class Config:
                 cfg.xkb_variant = xkb.get("variant", cfg.xkb_variant)
                 cfg.xkb_options = xkb.get("options", cfg.xkb_options)
                 cfg.wallpaper = data.get("wallpaper", cfg.wallpaper)
+                vol = data.get("volume", {})
+                cfg.volume_up = vol.get("up", cfg.volume_up)
+                cfg.volume_down = vol.get("down", cfg.volume_down)
+                cfg.volume_mute = vol.get("mute", cfg.volume_mute)
                 if cfg.wallpaper:
                     cfg.wallpaper = os.path.expanduser(cfg.wallpaper)
                 layout_str = data.get("default_layout", cfg.default_layout.value)
@@ -1743,6 +1753,13 @@ class RiverWM:
             (XKB_KEY_g, SS, "_action_screenshot_region_file", ()),
             (XKB_KEY_Print, 0, "_action_screenshot_full", ()),
         ]
+        # Volume control (from [volume] config, empty string = disabled)
+        if self.config.volume_up:
+            key_table.append((XKB_KEY_XF86AudioRaiseVolume, 0, "_action_spawn", (self.config.volume_up,)))
+        if self.config.volume_down:
+            key_table.append((XKB_KEY_XF86AudioLowerVolume, 0, "_action_spawn", (self.config.volume_down,)))
+        if self.config.volume_mute:
+            key_table.append((XKB_KEY_XF86AudioMute, 0, "_action_spawn", (self.config.volume_mute,)))
         for keysym, mods, method, args in key_table:
             bind_key(keysym, mods, lambda m=method, a=args: getattr(self, m)(*a))
 

@@ -136,6 +136,9 @@ All bindings use the **Super** (Logo) key as the primary modifier.
 | `Super + G` | Screenshot region to clipboard |
 | `Super + Shift + G` | Screenshot region to file |
 | `Print` | Full screen screenshot to clipboard |
+| `XF86AudioRaiseVolume` | Volume up (configurable) |
+| `XF86AudioLowerVolume` | Volume down (configurable) |
+| `XF86AudioMute` | Toggle mute (configurable) |
 | `Super + Left Click` | Interactive move (floating windows) |
 | `Super + Right Click` | Interactive resize (floating windows) |
 
@@ -169,6 +172,14 @@ layout = "us"
 model = "pc105"
 variant = "altgr-intl"
 options = "ctrl:nocaps,compose:rctrl"
+
+# Volume control — commands run when XF86Audio keys are pressed.
+# Set any value to "" to disable that binding.
+# Defaults use wpctl (PipeWire).
+[volume]
+up = "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+"
+down = "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"
+mute = "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
 
 # Managed processes — started after protocol binding, restarted on crash.
 # One-shot commands (restart = false) run once after protocols are bound.
