@@ -815,6 +815,7 @@ class RiverWM:
         self._saved_match_index: Optional[dict] = None
 
         self.running = True
+        self.crash_reason: Optional[str] = None
 
     @property
     def current_desktop(self) -> Desktop:
@@ -2369,8 +2370,9 @@ class RiverWM:
                 break
             except Exception as e:
                 logger.error("Error in event loop: %s", e, exc_info=True)
-                if isinstance(e, RuntimeError) and "error: 32" in str(e):
-                    logger.error("Display connection lost (EPIPE), exiting")
+                if isinstance(e, RuntimeError):
+                    self.crash_reason = str(e)
+                    logger.error("Fatal display error, will restart: %s", e)
                     break
                 continue
 
@@ -2430,9 +2432,11 @@ class RiverWM:
                     cancel_read(display_ptr_int)
                 except Exception:
                     pass
-                # EPIPE (errno 32) means the compositor connection is gone
-                if isinstance(e, RuntimeError) and "error: 32" in str(e):
-                    logger.error("Display connection lost (EPIPE), exiting")
+                # Any RuntimeError from the Wayland display is fatal
+                # (EPIPE=32, EPROTOCOL=71, etc.) — retrying just log-loops
+                if isinstance(e, RuntimeError):
+                    self.crash_reason = str(e)
+                    logger.error("Fatal display error, will restart: %s", e)
                     break
                 continue
 
@@ -2454,7 +2458,20 @@ class RiverWM:
                 pass
 
 
+def _rotate_log():
+    """Preserve previous log as /tmp/wm2.<timestamp_ms>.log before starting fresh."""
+    log_path = "/tmp/wm2.log"
+    try:
+        if os.path.exists(log_path):
+            ts = int(time.time() * 1000)
+            os.replace(log_path, f"/tmp/wm2.{ts}.log")
+    except OSError:
+        pass
+
+
 def main():
+    _rotate_log()
+
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
@@ -2473,6 +2490,15 @@ def main():
     if saved_state is not None:
         wm._load_restart_state(saved_state)
         wm._saved_managed_pids = saved_state.get("managed_pids")
+        # Notify if this was a crash restart
+        crash_reason = saved_state.get("crash_reason")
+        if crash_reason:
+            logger.info("Restarted after crash: %s", crash_reason)
+            subprocess.Popen(
+                ["notify-send", "-u", "critical", "wm2 restarted",
+                 f"Crash reason: {crash_reason}"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
 
     # Handle SIGTERM gracefully
     def sigterm_handler(signum, frame):
@@ -2485,6 +2511,30 @@ def main():
     signal.signal(signal.SIGUSR1, sigusr1_handler)
 
     wm.run()
+
+    # If we exited due to a crash, save state and re-exec
+    if wm.crash_reason:
+        logger.info("Crash restart: saving state and re-exec...")
+        managed_pids = None
+        if wm.process_manager:
+            managed_pids = wm.process_manager.terminate_non_persistent()
+            wm.process_manager.close_pipe()
+            wm.process_manager = None
+        _save_state(wm, managed_pids=managed_pids)
+        # Inject crash_reason into the saved state file
+        path = _state_file_path()
+        try:
+            with open(path, "r") as f:
+                state = json.load(f)
+            state["crash_reason"] = wm.crash_reason
+            with open(path, "w") as f:
+                json.dump(state, f)
+        except (OSError, json.JSONDecodeError):
+            pass
+        wm.shutdown()
+        python = sys.executable
+        os.execv(python, [python] + sys.argv)
+
     sys.exit(1)
 
 
