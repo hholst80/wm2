@@ -16,6 +16,8 @@ A window manager for the [River](https://codeberg.org/river/river) Wayland compo
 | **Max** | The focused window occupies the entire usable area (respects panels/bars). Only one window is visible at a time. |
 | **2-Split** | The output is divided into a left and right stack separated by a vertical split. Each side has its own ordered stack; only the top window on each side is visible. New windows are auto-balanced to the empty side when the focused side already has a window. |
 
+**Popup/Dialog Layer.** Dialog windows are automatically detected and rendered as small floating popups on top of the current view. Detection works via the `parent` property (xdg-toplevel parent) or size-based heuristics (windows dramatically smaller than their tile area). Popups can be moved with `Super + Left Click`, closed with `Super + Q`, and cycled with `Super + J/K` when focused. Clicking a background window shifts keyboard focus there while the popup stays visible; clicking the popup re-focuses it. Popup positions are preserved across hot-reload.
+
 **Focus Management.** Keyboard focus is explicitly managed by the WM. In max/fullscreen modes, focus is always on the single visible window. In 2-split mode, focus is on one of the two visible windows and can be moved between sides.
 
 **Wallpaper.** Built-in wallpaper rendering via `wlr-layer-shell`. Images are scaled (fill mode, center-crop) and rendered at the native physical pixel resolution of each output. Configure via `wallpaper` in `config.toml`. Requires Pillow.
@@ -139,8 +141,8 @@ All bindings use the **Super** (Logo) key as the primary modifier.
 | `XF86AudioRaiseVolume` | Volume up (configurable) |
 | `XF86AudioLowerVolume` | Volume down (configurable) |
 | `XF86AudioMute` | Toggle mute (configurable) |
-| `Super + Left Click` | Interactive move (floating windows) |
-| `Super + Right Click` | Interactive resize (floating windows) |
+| `Super + Left Click` | Interactive move (floating/popup windows) |
+| `Super + Right Click` | Interactive resize (floating/popup windows) |
 
 ## Configuration
 
@@ -249,7 +251,7 @@ A 10-pixel tolerance prevents false-triggering on cell-aligned terminals (e.g. f
 
 Sending `SIGUSR1` to the wm2 process triggers a hot-reload (re-exec). This is equivalent to `Super + Shift + R`.
 
-On hot-reload, the WM serializes its state (desktop assignments, layout modes, window positions, floating stack) to a JSON file in `$XDG_RUNTIME_DIR` and re-adopts persistent managed processes by PID instead of restarting them. When the new instance starts, it restores each window to its previous desktop and layout position as the compositor re-advertises them.
+On hot-reload, the WM serializes its state (desktop assignments, layout modes, window positions, floating stack, popup stack) to a JSON file in `$XDG_RUNTIME_DIR` and re-adopts persistent managed processes by PID instead of restarting them. When the new instance starts, it restores each window to its previous desktop and layout position as the compositor re-advertises them.
 
 ```bash
 kill -USR1 $(pgrep -f 'python3.*wm2.py')

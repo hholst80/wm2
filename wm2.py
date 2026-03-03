@@ -97,12 +97,17 @@ def _save_state(wm, managed_pids: Optional[dict] = None) -> None:
         {"app_id": w.app_id, "title": w.title, "pos_x": w.pos_x, "pos_y": w.pos_y}
         for w in wm.floating_stack
     ]
+    popups = [
+        {"app_id": w.app_id, "title": w.title, "pos_x": w.pos_x, "pos_y": w.pos_y}
+        for w in wm.popup_stack
+    ]
     state = {
         "version": 1,
         "current_desktop_id": wm.current_desktop_id,
         "floating_active": wm.floating_active,
         "desktops": desktops,
         "floating_stack": floating,
+        "popup_stack": popups,
     }
     if managed_pids:
         state["managed_pids"] = managed_pids
@@ -577,7 +582,7 @@ class WindowState:
     width: int = 0
     height: int = 0
     parent: Optional["WindowState"] = None
-    desktop_id: int = 1  # 1-4 or 0 for floating overlay
+    desktop_id: int = 1  # 1-4, 0 for floating overlay, -1 for popup/dialog
     side: Side = Side.LEFT  # only meaningful in split mode
     is_fullscreen: bool = False
     pending_initial_dimensions: bool = True
@@ -787,6 +792,8 @@ class RiverWM:
         self.seats: list = []    # list of SeatState
         self.desktops: dict = {i: Desktop(id=i, layout=config.default_layout) for i in range(1, 5)}
         self.floating_stack: list = []  # WindowState list, [0] = top
+        self.popup_stack: list = []    # WindowState list, [0] = top (dialogs with parent)
+        self.popup_has_focus: bool = False  # whether focus is currently on a popup
 
         self.current_desktop_id: int = 1
         self.floating_active: bool = False
@@ -938,7 +945,7 @@ class RiverWM:
         window_proxy.dispatcher["dimensions"] = lambda p, w, h: self._on_window_dimensions(win, w, h)
         window_proxy.dispatcher["app_id"] = lambda p, aid: setattr(win, 'app_id', aid)
         window_proxy.dispatcher["title"] = lambda p, t: setattr(win, 'title', t)
-        window_proxy.dispatcher["parent"] = lambda p, pp: setattr(win, 'parent', self.windows.get(id(pp)) if pp else None)
+        window_proxy.dispatcher["parent"] = lambda p, pp: self._on_parent(win, pp)
         window_proxy.dispatcher["decoration_hint"] = lambda p, hint: None  # ignore
         window_proxy.dispatcher["pointer_move_requested"] = lambda p, seat: self._on_pointer_move_requested(win, seat)
         window_proxy.dispatcher["pointer_resize_requested"] = lambda p, seat, edges: self._on_pointer_resize_requested(win, seat, edges)
@@ -950,6 +957,29 @@ class RiverWM:
         """Window has been closed by the server."""
         win.closed = True
         logger.info("Window closed: app_id=%s title=%s", win.app_id, win.title)
+
+    def _on_parent(self, win: WindowState, parent_proxy):
+        """Handle parent event for a window."""
+        if parent_proxy:
+            parent_win = self.windows.get(id(parent_proxy))
+            if parent_win is None:
+                logger.warning("Parent event for %s: proxy %s not found in windows dict",
+                               win.app_id, id(parent_proxy))
+            else:
+                logger.info("Parent event for %s: parent=%s", win.app_id, parent_win.app_id)
+        else:
+            parent_win = None
+            logger.info("Parent event for %s: parent=None", win.app_id)
+
+        win.parent = parent_win
+
+        # Late parent assignment: window already placed on a desktop, promote to popup
+        if (parent_win is not None and not parent_win.closed
+                and win.desktop_id != -1
+                and win not in self.pending_new_windows):
+            logger.info("Late parent for %s (parent=%s), promoting to popup",
+                        win.app_id, parent_win.app_id)
+            self._promote_to_popup(win)
 
     def _on_window_dimensions(self, win: WindowState, width: int, height: int):
         """Window dimensions event (render sequence)."""
@@ -966,6 +996,10 @@ class RiverWM:
         # the window has rendered once at its default size, we jolt it by
         # proposing full-width for one cycle — this forces a new configure
         # event that the now-visible window can process.
+        # Popup: re-center when real dimensions arrive
+        if was_pending and changed and width > 0 and win.desktop_id == -1:
+            self._position_popup_on_parent(win)
+            return
         if was_pending and changed and width > 0 and win.desktop_id > 0:
             desktop = self.desktops.get(win.desktop_id)
             output = self.primary_output
@@ -975,6 +1009,15 @@ class RiverWM:
                     tile_w = ua[2] // 2
                 else:
                     tile_w = ua[2]
+                # Dialog detection: if window is dramatically smaller than its
+                # tile area (less than half in both dimensions), treat it as a
+                # popup dialog rather than a tiled window.  This catches dialogs
+                # from Wine/Sober and other apps that don't set a parent.
+                if width < tile_w // 2 and height < ua[3] // 2:
+                    logger.info("Window %s initial size %dx%d << tile %dx%d, promoting to popup",
+                                win.app_id, width, height, tile_w, ua[3])
+                    self._promote_to_popup(win)
+                    return
                 # Use a tolerance to avoid false-triggering on cell-aligned
                 # windows (e.g. foot terminal at 1919x1037 vs tile 1920x1038).
                 threshold = 10
@@ -993,13 +1036,13 @@ class RiverWM:
     def _on_pointer_move_requested(self, win: WindowState, seat_proxy):
         """Window requested interactive pointer move."""
         seat = self._find_seat(seat_proxy)
-        if seat and self.in_manage and win.desktop_id == 0:
+        if seat and self.in_manage and win.desktop_id in (0, -1):
             self._start_interactive_op(seat, win, "move")
 
     def _on_pointer_resize_requested(self, win: WindowState, seat_proxy, edges):
         """Window requested interactive pointer resize."""
         seat = self._find_seat(seat_proxy)
-        if seat and self.in_manage and win.desktop_id == 0:
+        if seat and self.in_manage and win.desktop_id in (0, -1):
             self._start_interactive_op(seat, win, "resize")
 
     def _on_activation_requested(self, win: WindowState):
@@ -1438,6 +1481,10 @@ class RiverWM:
             for entry in self._saved_state.get("floating_stack", []):
                 e = dict(entry, desktop_id=0, source="floating")
                 idx[(entry.get("app_id"), entry.get("title"))].append(e)
+            # Index popup windows
+            for entry in self._saved_state.get("popup_stack", []):
+                e = dict(entry, desktop_id=-1, source="popup")
+                idx[(entry.get("app_id"), entry.get("title"))].append(e)
             self._saved_match_index = idx
         key = (win.app_id, win.title)
         entries = self._saved_match_index.get(key)
@@ -1449,7 +1496,16 @@ class RiverWM:
         """Place a window according to saved state entry."""
         did = saved["desktop_id"]
         source = saved["source"]
-        if did == 0 or source == "floating":
+        if did == -1 or source == "popup":
+            # Popup/dialog window
+            win.desktop_id = -1
+            self.popup_stack.append(win)
+            win.pos_x = saved.get("pos_x", 0)
+            win.pos_y = saved.get("pos_y", 0)
+            win.proxy.set_tiled(EDGE_NONE)
+            logger.info("Restored popup window %s/%s at (%d,%d)",
+                        win.app_id, win.title, win.pos_x, win.pos_y)
+        elif did == 0 or source == "floating":
             # Floating window
             win.desktop_id = 0
             self.floating_stack.append(win)
@@ -1494,6 +1550,16 @@ class RiverWM:
             self._restore_window_from_saved(win, saved)
             if win.desktop_id == 0:
                 self._propose_window_dimensions(win)
+            return
+
+        # Popup/dialog detection: windows with a living parent
+        if win.parent is not None and not win.parent.closed:
+            win.desktop_id = -1
+            self.popup_stack.insert(0, win)
+            self.popup_has_focus = True
+            win.proxy.set_tiled(EDGE_NONE)
+            self._position_popup_on_parent(win)
+            logger.info("Placed popup %s (parent=%s)", win.app_id, win.parent.app_id)
             return
 
         if self.floating_active:
@@ -1544,9 +1610,66 @@ class RiverWM:
             win.proxy.propose_dimensions(ua_w // 2, ua_h)
             logger.info("Proposed split dimensions %dx%d for %s", ua_w // 2, ua_h, win.app_id)
 
+    def _position_popup_on_parent(self, win: WindowState):
+        """Center a popup window over its parent window."""
+        output = self.primary_output
+        if output is None:
+            return
+        ua_x, ua_y, ua_w, ua_h = self._usable_area(output)
+        parent = win.parent
+
+        # Determine parent center
+        if parent is not None and not parent.closed:
+            if parent.desktop_id == -1 or parent.desktop_id == 0:
+                # Floating or popup parent — use its position + dimensions
+                px = parent.pos_x + parent.width // 2
+                py = parent.pos_y + parent.height // 2
+            elif parent.desktop_id > 0:
+                # Tiled parent — compute from usable area + layout
+                desktop = self.desktops.get(parent.desktop_id)
+                if desktop and desktop.layout == LayoutMode.SPLIT:
+                    half_w = ua_w // 2
+                    if parent.side == Side.LEFT:
+                        px = ua_x + half_w // 2
+                    else:
+                        px = ua_x + half_w + half_w // 2
+                    py = ua_y + ua_h // 2
+                else:
+                    # MAX/FULLSCREEN — center of usable area
+                    px = ua_x + ua_w // 2
+                    py = ua_y + ua_h // 2
+            else:
+                px = ua_x + ua_w // 2
+                py = ua_y + ua_h // 2
+        else:
+            # No valid parent — center on output
+            px = ua_x + ua_w // 2
+            py = ua_y + ua_h // 2
+
+        # Use win dimensions if known, otherwise estimate as quarter of output
+        w = win.width if win.width > 0 else ua_w // 4
+        h = win.height if win.height > 0 else ua_h // 4
+        win.pos_x = max(ua_x, min(px - w // 2, ua_x + ua_w - w))
+        win.pos_y = max(ua_y, min(py - h // 2, ua_y + ua_h - h))
+
+    def _promote_to_popup(self, win: WindowState):
+        """Promote a tiled/floating window to the popup layer."""
+        self._remove_window(win)
+        win.desktop_id = -1
+        self.popup_stack.insert(0, win)
+        self.popup_has_focus = True
+        self._position_popup_on_parent(win)
+        self.needs_layout = True
+        self.wm_proxy.manage_dirty()
+
     def _remove_window(self, win: WindowState):
         """Remove a window from all tracking structures."""
-        if win.desktop_id == 0:
+        if win.desktop_id == -1:
+            if win in self.popup_stack:
+                self.popup_stack.remove(win)
+            if not self.popup_stack:
+                self.popup_has_focus = False
+        elif win.desktop_id == 0:
             if win in self.floating_stack:
                 self.floating_stack.remove(win)
         else:
@@ -1561,6 +1684,19 @@ class RiverWM:
         """Set focus to a specific window."""
         if win is None or win.closed:
             return
+
+        if win.desktop_id == -1:
+            # Focusing a popup — bring to top of popup_stack
+            if win in self.popup_stack:
+                self.popup_stack.remove(win)
+                self.popup_stack.insert(0, win)
+            self.popup_has_focus = True
+            if self.in_manage:
+                seat.proxy.focus_window(win.proxy)
+            return
+
+        # Focusing a non-popup window — popups stay visible but lose focus
+        self.popup_has_focus = False
 
         # If the window is on a different desktop, switch to it
         if win.desktop_id != 0 and win.desktop_id != self.current_desktop_id:
@@ -1597,6 +1733,8 @@ class RiverWM:
 
     def _get_focused_window(self) -> Optional[WindowState]:
         """Get the currently focused window."""
+        if self.popup_has_focus and self.popup_stack:
+            return self.popup_stack[0]
         if self.floating_active and self.floating_stack:
             return self.floating_stack[0]
         return self.current_desktop.get_focused_window()
@@ -1770,6 +1908,14 @@ class RiverWM:
                     logger.debug("manage_state: SPLIT-%s propose %dx%d for %s (cur %dx%d)",
                                  side, half_w, ua_h, win.app_id, win.width, win.height)
 
+        # Popup windows — let clients use their natural dialog size
+        for win in self.popup_stack:
+            if not win.closed:
+                win.proxy.set_tiled(EDGE_NONE)
+                if win.width == 0 and win.height == 0:
+                    # Initial state: no dimensions proposal, client picks its size
+                    pass
+
         # Set focus
         if seat and focused and not focused.closed:
             seat.proxy.focus_window(focused.proxy)
@@ -1806,6 +1952,9 @@ class RiverWM:
                 if not win.closed and win.node:
                     win.proxy.hide()
 
+        # Popup layer (always rendered on top, independent of floating toggle)
+        self._layout_popups(output, focused)
+
     def _layout_desktop(self, desktop: Desktop, output: OutputState, focused: Optional[WindowState]):
         """Layout windows on the current desktop."""
         if desktop.layout == LayoutMode.SPLIT:
@@ -1814,20 +1963,21 @@ class RiverWM:
             self._layout_single(desktop, output, focused, with_borders=desktop.layout != LayoutMode.FULLSCREEN)
 
     def _layout_single(self, desktop: Desktop, output: OutputState, focused: Optional[WindowState], with_borders: bool):
-        """Fullscreen/Max layout: focused window visible, others hidden."""
+        """Fullscreen/Max layout: desktop-focused window visible, others hidden."""
         if with_borders:
             ua_x, ua_y, ua_w, ua_h = self._usable_area(output)
+        desktop_focused = desktop.get_focused_window()
         for win in desktop.windows:
             if win.closed:
                 continue
-            if win == focused:
+            if win == desktop_focused:
                 win.proxy.show()
                 if win.node:
                     if with_borders:
                         win.node.set_position(ua_x, ua_y)
                     win.node.place_top()
                 if with_borders:
-                    self._set_borders(win, True)
+                    self._set_borders(win, win == focused)
             else:
                 win.proxy.hide()
 
@@ -1876,6 +2026,17 @@ class RiverWM:
     def _layout_floating(self, output: OutputState, focused: Optional[WindowState]):
         """Layout floating overlay windows."""
         for win in reversed(self.floating_stack):
+            if win.closed:
+                continue
+            win.proxy.show()
+            if win.node:
+                win.node.set_position(win.pos_x, win.pos_y)
+                win.node.place_top()
+            self._set_borders(win, win == focused)
+
+    def _layout_popups(self, output: OutputState, focused: Optional[WindowState]):
+        """Layout popup/dialog windows (always on top)."""
+        for win in reversed(self.popup_stack):
             if win.closed:
                 continue
             win.proxy.show()
@@ -2062,6 +2223,12 @@ class RiverWM:
         self.wm_proxy.manage_dirty()
 
     def _action_cycle_next(self):
+        if self.popup_has_focus and self.popup_stack:
+            if len(self.popup_stack) > 1:
+                self.popup_stack.append(self.popup_stack.pop(0))
+            self.wm_proxy.manage_dirty()
+            return
+
         if self.floating_active and self.floating_stack:
             # Rotate floating stack
             if len(self.floating_stack) > 1:
@@ -2079,6 +2246,12 @@ class RiverWM:
         self.wm_proxy.manage_dirty()
 
     def _action_cycle_prev(self):
+        if self.popup_has_focus and self.popup_stack:
+            if len(self.popup_stack) > 1:
+                self.popup_stack.insert(0, self.popup_stack.pop())
+            self.wm_proxy.manage_dirty()
+            return
+
         if self.floating_active and self.floating_stack:
             if len(self.floating_stack) > 1:
                 self.floating_stack.insert(0, self.floating_stack.pop())
@@ -2219,7 +2392,7 @@ class RiverWM:
             return
         seat = self.seats[0]
         win = seat.pointer_entered_window
-        if win and win.desktop_id == 0:
+        if win and win.desktop_id in (0, -1):
             self._start_interactive_op(seat, win, mode)
 
     # -------------------------------------------------------------------
