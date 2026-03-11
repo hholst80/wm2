@@ -1320,6 +1320,11 @@ class RiverWM:
         seat = SeatState(proxy=seat_proxy)
         self.seats.append(seat)
 
+        # Set cursor theme/size so the compositor renders at the right size
+        xcursor_theme = os.environ.get("XCURSOR_THEME", "Adwaita")
+        xcursor_size = int(os.environ.get("XCURSOR_SIZE", "24"))
+        seat_proxy.set_xcursor_theme(xcursor_theme, xcursor_size)
+
         seat_proxy.dispatcher["removed"] = lambda p: self._on_seat_removed(seat)
         seat_proxy.dispatcher["pointer_enter"] = lambda p, win: self._on_pointer_enter(seat, win)
         seat_proxy.dispatcher["pointer_leave"] = lambda p: self._on_pointer_leave(seat)
