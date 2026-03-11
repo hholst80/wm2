@@ -5,3 +5,4 @@ test_binary
 test_io
 test_io2
 claude.ai_public_artifacts_*.md
+*.egg-info/
