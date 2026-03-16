@@ -55,6 +55,10 @@ from protocols.wlr_layer_shell_unstable_v1 import (
     ZwlrLayerShellV1,
     ZwlrLayerSurfaceV1,
 )
+from protocols.wlr_output_power_management_unstable_v1 import (
+    ZwlrOutputPowerManagerV1,
+    ZwlrOutputPowerV1,
+)
 from protocols.wayland import (
     WlCompositor,
     WlSeat,
@@ -102,9 +106,10 @@ def _save_state(wm, managed_pids: Optional[dict] = None) -> None:
         for w in wm.popup_stack
     ]
     state = {
-        "version": 1,
+        "version": 2,
         "current_desktop_id": wm.current_desktop_id,
         "floating_active": wm.floating_active,
+        "floating_has_focus": wm.floating_has_focus,
         "desktops": desktops,
         "floating_stack": floating,
         "popup_stack": popups,
@@ -779,6 +784,10 @@ class RiverWM:
         self._wl_output_names: dict = {}  # id(WlOutput proxy) -> connector name
         self._initial_outputs_done: bool = False
 
+        # Output power management (DPMS early warning)
+        self.output_power_mgr = None  # ZwlrOutputPowerManagerV1 proxy
+        self._output_power_controls: dict = {}  # id(WlOutput) -> ZwlrOutputPowerV1 proxy
+
         # Cursor shape (reset cursor when pointer enters wm2-owned surfaces)
         self.wl_seat_proxy = None
         self.wl_pointer_proxy = None
@@ -794,6 +803,7 @@ class RiverWM:
         self.floating_stack: list = []  # WindowState list, [0] = top
         self.popup_stack: list = []    # WindowState list, [0] = top (dialogs with parent)
         self.popup_has_focus: bool = False  # whether focus is currently on a popup
+        self.floating_has_focus: bool = False  # whether focus is currently on the floating stack
 
         self.current_desktop_id: int = 1
         self.floating_active: bool = False
@@ -898,6 +908,18 @@ class RiverWM:
         elif iface_name == "wp_cursor_shape_manager_v1":
             self.cursor_shape_mgr = registry.bind(id_num, WpCursorShapeManagerV1, min(version, 1))
             logger.info("Bound wp_cursor_shape_manager_v1")
+        elif iface_name == "zwlr_output_power_manager_v1":
+            self.output_power_mgr = registry.bind(id_num, ZwlrOutputPowerManagerV1, min(version, 1))
+            logger.info("Bound zwlr_output_power_manager_v1 — DPMS early warning enabled")
+            # Create power controls for wl_outputs already bound
+            for gname, wl_out in self._wl_outputs.items():
+                if id(wl_out) not in self._output_power_controls:
+                    oname = self._wl_output_names.get(id(wl_out), "?")
+                    power = self.output_power_mgr.get_output_power(wl_out)
+                    power.dispatcher["mode"] = lambda p, mode, wo=wl_out: self._on_output_power_mode(wo, mode)
+                    power.dispatcher["failed"] = lambda p, n=oname: logger.warning("Output power control failed for %s", n)
+                    self._output_power_controls[id(wl_out)] = power
+                    logger.info("Created output power control for %s (retroactive)", oname)
 
     # -------------------------------------------------------------------
     # WM event handlers
@@ -1078,6 +1100,10 @@ class RiverWM:
 
         logger.info("New output created")
 
+    def _on_output_power_mode(self, wl_output_proxy, mode):
+        """Handle DPMS power state change."""
+        logger.info("Output power mode changed: %s", "on" if mode == 1 else "off")
+
     def _on_output_removed(self, out: OutputState):
         out.removed = True
         if out.bg_layer_surface is not None:
@@ -1101,6 +1127,13 @@ class RiverWM:
     def _on_wl_output_done(self, proxy):
         """Handle wl_output.done — re-run output-triggered processes after startup."""
         name = self._wl_output_names.get(id(proxy), "?")
+        # Bind output power control for DPMS early warning
+        if self.output_power_mgr is not None and id(proxy) not in self._output_power_controls:
+            power = self.output_power_mgr.get_output_power(proxy)
+            power.dispatcher["mode"] = lambda p, mode: self._on_output_power_mode(proxy, mode)
+            power.dispatcher["failed"] = lambda p: None  # expected when output is re-created
+            self._output_power_controls[id(proxy)] = power
+            logger.info("Created output power control for %s", name)
         if self._initial_outputs_done and self.process_manager is not None:
             logger.info("Output done event for %s (post-startup), firing output triggers", name)
             self.process_manager.run_output_triggered()
@@ -1439,6 +1472,9 @@ class RiverWM:
         """Apply non-window state from a restart state dict."""
         self.current_desktop_id = state.get("current_desktop_id", 1)
         self.floating_active = state.get("floating_active", False)
+        self.floating_has_focus = state.get("floating_has_focus", self.floating_active)
+        if not self.floating_active:
+            self.floating_has_focus = False
         for did_str, dstate in state.get("desktops", {}).items():
             did = int(did_str)
             desktop = self.desktops.get(did)
@@ -1567,10 +1603,11 @@ class RiverWM:
             logger.info("Placed popup %s (parent=%s)", win.app_id, win.parent.app_id)
             return
 
-        if self.floating_active:
+        if self.floating_active and self.floating_has_focus:
             # Place in floating overlay
             win.desktop_id = 0
             self.floating_stack.insert(0, win)
+            self.floating_has_focus = True
             # Center on output
             win.pos_x = output.x + output.width // 4
             win.pos_y = output.y + output.height // 4
@@ -1677,6 +1714,8 @@ class RiverWM:
         elif win.desktop_id == 0:
             if win in self.floating_stack:
                 self.floating_stack.remove(win)
+            if not self.floating_stack:
+                self.floating_has_focus = False
         else:
             desktop = self.desktops.get(win.desktop_id)
             if desktop:
@@ -1711,10 +1750,12 @@ class RiverWM:
 
         # Update desktop focus tracking
         if win.desktop_id == 0:
+            self.floating_has_focus = True
             if win in self.floating_stack:
                 self.floating_stack.remove(win)
                 self.floating_stack.insert(0, win)
         else:
+            self.floating_has_focus = False
             desktop = self.desktops[win.desktop_id]
             if desktop.layout == LayoutMode.SPLIT:
                 if win in desktop.left_stack:
@@ -1740,7 +1781,7 @@ class RiverWM:
         """Get the currently focused window."""
         if self.popup_has_focus and self.popup_stack:
             return self.popup_stack[0]
-        if self.floating_active and self.floating_stack:
+        if self.floating_active and self.floating_has_focus and self.floating_stack:
             return self.floating_stack[0]
         return self.current_desktop.get_focused_window()
 
@@ -1751,7 +1792,6 @@ class RiverWM:
         """Switch to a different desktop."""
         if desktop_id < 1 or desktop_id > 4:
             return
-        self.floating_active = False
         self.current_desktop_id = desktop_id
         self.needs_layout = True
         logger.info("Switched to desktop %d", desktop_id)
@@ -1762,6 +1802,7 @@ class RiverWM:
             return
         if target_desktop_id < 0 or target_desktop_id > 4:
             return
+        source_desktop_id = win.desktop_id
 
         # Remove from current location
         self._remove_window(win)
@@ -1774,6 +1815,8 @@ class RiverWM:
                 win.pos_x = output.x + output.width // 4
                 win.pos_y = output.y + output.height // 4
             self.floating_stack.insert(0, win)
+            if self.floating_active:
+                self.floating_has_focus = True
         else:
             win.desktop_id = target_desktop_id
             target = self.desktops[target_desktop_id]
@@ -1781,6 +1824,8 @@ class RiverWM:
                 target.ensure_window_in_split_stacks(win)
             else:
                 target.add_window(win)
+            if source_desktop_id == 0:
+                self.floating_has_focus = False
 
         self.needs_layout = True
 
@@ -1817,6 +1862,10 @@ class RiverWM:
 
         logger.info("Desktop %d layout changed to %s", desktop.id, mode.value)
 
+    def _is_wine_app(self, win):
+        """Check if window is a Wine-based app that shouldn't be force-resized."""
+        return win.app_id in ("org.vinegarhq.Sober", "sober", "sober_services")
+
     # -------------------------------------------------------------------
     # Apply manage state
     # -------------------------------------------------------------------
@@ -1842,7 +1891,8 @@ class RiverWM:
                         # won't render at all if fullscreened before their first
                         # frame.  Use propose_dimensions like MAX mode to let
                         # the client render, then fullscreen on a later cycle.
-                        win.proxy.set_tiled(EDGE_ALL)
+                        if not self._is_wine_app(win):
+                            win.proxy.set_tiled(EDGE_ALL)
                         win.proxy.propose_dimensions(ua_w, ua_h)
                         logger.debug("manage_state: FULLSCREEN defer, propose %dx%d for %s (no dims yet)",
                                      ua_w, ua_h, win.app_id)
@@ -1877,7 +1927,10 @@ class RiverWM:
         if desktop.layout == LayoutMode.MAX:
             for win in desktop.windows:
                 if not win.closed:
-                    win.proxy.set_tiled(EDGE_ALL)
+                    # Skip set_tiled for Wine apps — Wine's Wayland driver
+                    # crashes on output removal when tiled state is set.
+                    if not self._is_wine_app(win):
+                        win.proxy.set_tiled(EDGE_ALL)
                     if win.needs_resize_jolt:
                         jolt_w = ua_w - 1
                         win.proxy.propose_dimensions(jolt_w, ua_h)
@@ -1895,7 +1948,8 @@ class RiverWM:
             for side, win in (("L", left_visible), ("R", right_visible)):
                 if win is None:
                     continue
-                win.proxy.set_tiled(EDGE_ALL)
+                if not self._is_wine_app(win):
+                    win.proxy.set_tiled(EDGE_ALL)
                 if win.needs_resize_jolt:
                     # The compositor deduplicates identical proposals, so we
                     # must propose a size different from BOTH the window's
@@ -1938,12 +1992,17 @@ class RiverWM:
 
         focused = self._get_focused_window()
 
-        # First: hide all windows on non-current desktops
-        for did, desktop in self.desktops.items():
-            if did != self.current_desktop_id:
-                for win in desktop.all_windows():
-                    if not win.closed and win.node:
-                        win.proxy.hide()
+        # Hard-clear all tiled windows first. The current desktop layout pass
+        # will re-show only the windows that should be visible.
+        seen = set()
+        for desktop in self.desktops.values():
+            for win in desktop.windows + desktop.left_stack + desktop.right_stack:
+                key = id(win)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if not win.closed:
+                    win.proxy.hide()
 
         # Current desktop
         desktop = self.current_desktop
@@ -1954,7 +2013,7 @@ class RiverWM:
             self._layout_floating(output, focused)
         else:
             for win in self.floating_stack:
-                if not win.closed and win.node:
+                if not win.closed:
                     win.proxy.hide()
 
         # Popup layer (always rendered on top, independent of floating toggle)
@@ -2209,6 +2268,7 @@ class RiverWM:
 
     def _action_toggle_floating(self):
         self.floating_active = not self.floating_active
+        self.floating_has_focus = self.floating_active and bool(self.floating_stack)
         self.needs_layout = True
         self.wm_proxy.manage_dirty()
         logger.info("Floating overlay %s", "activated" if self.floating_active else "deactivated")
@@ -2234,7 +2294,7 @@ class RiverWM:
             self.wm_proxy.manage_dirty()
             return
 
-        if self.floating_active and self.floating_stack:
+        if self.floating_active and self.floating_has_focus and self.floating_stack:
             # Rotate floating stack
             if len(self.floating_stack) > 1:
                 self.floating_stack.append(self.floating_stack.pop(0))
@@ -2257,7 +2317,7 @@ class RiverWM:
             self.wm_proxy.manage_dirty()
             return
 
-        if self.floating_active and self.floating_stack:
+        if self.floating_active and self.floating_has_focus and self.floating_stack:
             if len(self.floating_stack) > 1:
                 self.floating_stack.insert(0, self.floating_stack.pop())
             self.wm_proxy.manage_dirty()
