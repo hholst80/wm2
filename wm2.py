@@ -55,10 +55,6 @@ from protocols.wlr_layer_shell_unstable_v1 import (
     ZwlrLayerShellV1,
     ZwlrLayerSurfaceV1,
 )
-from protocols.wlr_output_power_management_unstable_v1 import (
-    ZwlrOutputPowerManagerV1,
-    ZwlrOutputPowerV1,
-)
 from protocols.wayland import (
     WlCompositor,
     WlSeat,
@@ -784,10 +780,6 @@ class RiverWM:
         self._wl_output_names: dict = {}  # id(WlOutput proxy) -> connector name
         self._initial_outputs_done: bool = False
 
-        # Output power management (DPMS early warning)
-        self.output_power_mgr = None  # ZwlrOutputPowerManagerV1 proxy
-        self._output_power_controls: dict = {}  # id(WlOutput) -> ZwlrOutputPowerV1 proxy
-
         # Cursor shape (reset cursor when pointer enters wm2-owned surfaces)
         self.wl_seat_proxy = None
         self.wl_pointer_proxy = None
@@ -908,18 +900,6 @@ class RiverWM:
         elif iface_name == "wp_cursor_shape_manager_v1":
             self.cursor_shape_mgr = registry.bind(id_num, WpCursorShapeManagerV1, min(version, 1))
             logger.info("Bound wp_cursor_shape_manager_v1")
-        elif iface_name == "zwlr_output_power_manager_v1":
-            self.output_power_mgr = registry.bind(id_num, ZwlrOutputPowerManagerV1, min(version, 1))
-            logger.info("Bound zwlr_output_power_manager_v1 — DPMS early warning enabled")
-            # Create power controls for wl_outputs already bound
-            for gname, wl_out in self._wl_outputs.items():
-                if id(wl_out) not in self._output_power_controls:
-                    oname = self._wl_output_names.get(id(wl_out), "?")
-                    power = self.output_power_mgr.get_output_power(wl_out)
-                    power.dispatcher["mode"] = lambda p, mode, wo=wl_out: self._on_output_power_mode(wo, mode)
-                    power.dispatcher["failed"] = lambda p, n=oname: logger.warning("Output power control failed for %s", n)
-                    self._output_power_controls[id(wl_out)] = power
-                    logger.info("Created output power control for %s (retroactive)", oname)
 
     # -------------------------------------------------------------------
     # WM event handlers
@@ -1100,10 +1080,6 @@ class RiverWM:
 
         logger.info("New output created")
 
-    def _on_output_power_mode(self, wl_output_proxy, mode):
-        """Handle DPMS power state change."""
-        logger.info("Output power mode changed: %s", "on" if mode == 1 else "off")
-
     def _on_output_removed(self, out: OutputState):
         out.removed = True
         if out.bg_layer_surface is not None:
@@ -1127,13 +1103,6 @@ class RiverWM:
     def _on_wl_output_done(self, proxy):
         """Handle wl_output.done — re-run output-triggered processes after startup."""
         name = self._wl_output_names.get(id(proxy), "?")
-        # Bind output power control for DPMS early warning
-        if self.output_power_mgr is not None and id(proxy) not in self._output_power_controls:
-            power = self.output_power_mgr.get_output_power(proxy)
-            power.dispatcher["mode"] = lambda p, mode: self._on_output_power_mode(proxy, mode)
-            power.dispatcher["failed"] = lambda p: None  # expected when output is re-created
-            self._output_power_controls[id(proxy)] = power
-            logger.info("Created output power control for %s", name)
         if self._initial_outputs_done and self.process_manager is not None:
             logger.info("Output done event for %s (post-startup), firing output triggers", name)
             self.process_manager.run_output_triggered()
