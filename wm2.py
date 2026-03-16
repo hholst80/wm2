@@ -1024,9 +1024,15 @@ class RiverWM:
                 # windows (e.g. foot terminal at 1919x1037 vs tile 1920x1038).
                 threshold = 10
                 if width < tile_w - threshold or height < ua[3] - threshold:
-                    win.needs_resize_jolt = True
-                    logger.info("Window %s initial size %dx%d < tile %dx%d, scheduling jolt",
-                                win.app_id, width, height, tile_w, ua[3])
+                    if self._is_wine_app(win):
+                        # Wine apps don't get set_tiled, so the compositor
+                        # won't deduplicate proposals — no jolt needed.
+                        logger.info("Window %s initial size %dx%d < tile %dx%d, Wine app (no jolt)",
+                                    win.app_id, width, height, tile_w, ua[3])
+                    else:
+                        win.needs_resize_jolt = True
+                        logger.info("Window %s initial size %dx%d < tile %dx%d, scheduling jolt",
+                                    win.app_id, width, height, tile_w, ua[3])
                 return
         if changed:
             self.needs_layout = True
