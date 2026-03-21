@@ -1691,6 +1691,22 @@ class RiverWM:
                 self.popup_stack.remove(win)
             if not self.popup_stack:
                 self.popup_has_focus = False
+                # Restore desktop focus to the popup's parent window so that
+                # a spurious compositor window_interaction event (fired before
+                # the closed event) doesn't leave focused_index on the wrong
+                # window.
+                if win.parent and not win.parent.closed:
+                    parent = win.parent
+                    if parent.desktop_id == self.current_desktop_id:
+                        desktop = self.desktops.get(parent.desktop_id)
+                        if desktop:
+                            if desktop.layout == LayoutMode.SPLIT:
+                                if parent in desktop.left_stack:
+                                    desktop.focused_side = Side.LEFT
+                                elif parent in desktop.right_stack:
+                                    desktop.focused_side = Side.RIGHT
+                            elif parent in desktop.windows:
+                                desktop.focused_index = desktop.windows.index(parent)
         elif win.desktop_id == 0:
             if win in self.floating_stack:
                 self.floating_stack.remove(win)
