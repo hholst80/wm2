@@ -237,7 +237,9 @@ class Config:
     xkb_model: str = ""     # [xkb] model (e.g. "pc105"), empty = don't touch
     xkb_variant: str = ""   # [xkb] variant (e.g. "dvorak"), empty = don't touch
     xkb_options: str = ""   # [xkb] options (e.g. "ctrl:nocaps"), empty = don't touch
-    wallpaper: str = ""     # path to wallpaper image, empty = no wallpaper
+    xcursor_theme: str = ""  # cursor theme name, empty = XCURSOR_THEME or "Adwaita"
+    xcursor_size: int = 0    # cursor size in pixels, 0 = XCURSOR_SIZE or 24
+    wallpaper: str = ""      # path to wallpaper image, empty = no wallpaper
     volume_up: str = "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+"
     volume_down: str = "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"
     volume_mute: str = "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
@@ -271,6 +273,8 @@ class Config:
                 cfg.xkb_model = xkb.get("model", cfg.xkb_model)
                 cfg.xkb_variant = xkb.get("variant", cfg.xkb_variant)
                 cfg.xkb_options = xkb.get("options", cfg.xkb_options)
+                cfg.xcursor_theme = data.get("xcursor_theme", cfg.xcursor_theme)
+                cfg.xcursor_size = data.get("xcursor_size", cfg.xcursor_size)
                 cfg.wallpaper = data.get("wallpaper", cfg.wallpaper)
                 vol = data.get("volume", {})
                 cfg.volume_up = vol.get("up", cfg.volume_up)
@@ -1329,8 +1333,8 @@ class RiverWM:
         self.seats.append(seat)
 
         # Set cursor theme/size so the compositor renders at the right size
-        xcursor_theme = os.environ.get("XCURSOR_THEME", "Adwaita")
-        xcursor_size = int(os.environ.get("XCURSOR_SIZE", "24"))
+        xcursor_theme = self.config.xcursor_theme or os.environ.get("XCURSOR_THEME", "Adwaita")
+        xcursor_size = self.config.xcursor_size or int(os.environ.get("XCURSOR_SIZE", "24"))
         seat_proxy.set_xcursor_theme(xcursor_theme, xcursor_size)
 
         seat_proxy.dispatcher["removed"] = lambda p: self._on_seat_removed(seat)
