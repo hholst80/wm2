@@ -215,7 +215,6 @@ class ProcessConfig:
     restart_delay: float = 1.0
     restart_max_delay: float = 30.0
     rerun_on_output: bool = False
-    after: list = field(default_factory=list)  # DBus names that must be present before starting
 
 
 class Side(enum.Enum):
@@ -294,7 +293,6 @@ class Config:
                             restart_delay=proc.get("restart_delay", 1.0),
                             restart_max_delay=proc.get("restart_max_delay", 30.0),
                             rerun_on_output=proc.get("rerun_on_output", False),
-                            after=proc.get("after", []),
                         ))
                 logger.info("Loaded config from %s", path)
             except Exception as e:
@@ -414,12 +412,6 @@ class ProcessManager:
     def _start(self, mp):
         if mp.proc is not None:
             return  # already running or adopted
-        if mp.config.after and not self._dbus_names_present(mp.config.after):
-            if mp.next_restart_at == 0:
-                mp.next_restart_at = time.monotonic() + 0.5
-                logger.info("Waiting for DBus names %s before starting %s",
-                            mp.config.after, mp.config.cmd)
-            return
         try:
             mp.proc = subprocess.Popen(
                 mp.config.cmd, shell=True,
@@ -430,21 +422,6 @@ class ProcessManager:
             logger.info("Started managed process: %s (pid=%d)", mp.config.cmd, mp.proc.pid)
         except Exception as e:
             logger.error("Failed to start managed process %s: %s", mp.config.cmd, e)
-
-    @staticmethod
-    def _dbus_names_present(names):
-        """Check if all given DBus session bus names are currently owned."""
-        try:
-            out = subprocess.check_output(
-                ["dbus-send", "--session", "--dest=org.freedesktop.DBus",
-                 "--print-reply", "/org/freedesktop/DBus",
-                 "org.freedesktop.DBus.ListNames"],
-                stderr=subprocess.DEVNULL, timeout=2,
-            )
-            active = out.decode("utf-8", errors="replace")
-            return all(name in active for name in names)
-        except Exception:
-            return False
 
     def handle_sigchld(self):
         """Drain the self-pipe and reap children. Schedule restarts as needed."""
@@ -490,7 +467,7 @@ class ProcessManager:
         now = time.monotonic()
         next_at = None
         for mp in self._managed:
-            pending = mp.config.restart or mp.config.after
+            pending = mp.config.restart
             if mp.proc is None and pending and mp.next_restart_at > 0:
                 if now >= mp.next_restart_at:
                     mp.next_restart_at = 0.0

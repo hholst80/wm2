@@ -41,10 +41,18 @@ mute = "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
 #         rerun_on_output (bool, default false)
 #
 # One-shot commands (restart = false) are useful for setup that must run
-# after wm2 has bound protocols (e.g. display scaling).
+# after wm2 has bound protocols (e.g. display scaling, env propagation).
 #
 # Set rerun_on_output = true to re-run a one-shot command whenever a monitor
 # is reconnected or wakes from DPMS (the wl_output global is re-advertised).
+#
+# Propagate compositor env vars into DBus activation environment so that
+# DBus-activated services (xdg-desktop-portal, etc.) can connect to the
+# Wayland display. Must run before any flatpak/portal clients start.
+#
+# [[process]]
+# cmd = "dbus-update-activation-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XCURSOR_THEME XCURSOR_SIZE"
+# restart = false
 #
 # [[process]]
 # cmd = "wlr-randr --output eDP-1 --scale 2"
@@ -56,7 +64,3 @@ mute = "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
 #
 # [[process]]
 # cmd = "waybar"
-#
-# [[process]]
-# cmd = "swaync"
-# restart = false
