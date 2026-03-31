@@ -1093,12 +1093,24 @@ class RiverWM:
 
     def _on_output_removed(self, out: OutputState):
         out.removed = True
+        if out.layer_shell_output is not None:
+            out.layer_shell_output.destroy()
+            out.layer_shell_output = None
         if out.bg_layer_surface is not None:
             out.bg_layer_surface.destroy()
             out.bg_layer_surface = None
         if out.bg_surface is not None:
             out.bg_surface.destroy()
             out.bg_surface = None
+        if out.wl_output is not None:
+            wl_id = id(out.wl_output)
+            out.wl_output.release()
+            out.wl_output = None
+            self._wl_output_names.pop(wl_id, None)
+            for key, val in list(self._wl_outputs.items()):
+                if id(val) == wl_id:
+                    del self._wl_outputs[key]
+                    break
         logger.info("Output removed")
 
     def _on_output_wl_output(self, out: OutputState, name: int):
@@ -1391,6 +1403,7 @@ class RiverWM:
         for win in closed:
             logger.info("Removing closed window: %s (proxy=%s)", win.app_id, id(win.proxy))
             self._remove_window(win)
+            win.node.destroy()
             win.proxy.destroy()
             del self.windows[id(win.proxy)]
             logger.info("Window removed successfully")
