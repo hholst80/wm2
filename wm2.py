@@ -2832,12 +2832,10 @@ class RiverWM:
         managed_pids = None
         if self.process_manager:
             managed_pids = self.process_manager.terminate_non_persistent()
-            self.process_manager.close_pipe()
-            self.process_manager = None
         _save_state(self, managed_pids=managed_pids)
-        self.shutdown()
+        self.shutdown(keep_persistent_processes=True)
         python = sys.executable
-        os.execv(python, [python] + sys.argv)
+        os.execv(python, ["python3"] + sys.argv)
 
     def _action_pointer_op(self, mode: str):
         if not self.seats:
@@ -3066,11 +3064,14 @@ class RiverWM:
                     break
                 continue
 
-    def shutdown(self):
+    def shutdown(self, keep_persistent_processes=False):
         """Clean shutdown."""
         logger.info("Shutting down wm2")
         if self.process_manager:
-            self.process_manager.terminate_all()
+            if keep_persistent_processes:
+                self.process_manager.terminate_non_persistent()
+            else:
+                self.process_manager.terminate_all()
             self.process_manager.close_pipe()
         if self.wm_proxy:
             try:
@@ -3144,8 +3145,6 @@ def main():
         managed_pids = None
         if wm.process_manager:
             managed_pids = wm.process_manager.terminate_non_persistent()
-            wm.process_manager.close_pipe()
-            wm.process_manager = None
         _save_state(wm, managed_pids=managed_pids)
         # Inject crash_reason into the saved state file
         path = _state_file_path()
@@ -3157,9 +3156,9 @@ def main():
                 json.dump(state, f)
         except (OSError, json.JSONDecodeError):
             pass
-        wm.shutdown()
+        wm.shutdown(keep_persistent_processes=True)
         python = sys.executable
-        os.execv(python, [python] + sys.argv)
+        os.execv(python, ["python3"] + sys.argv)
 
     sys.exit(1)
 
