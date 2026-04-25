@@ -55,6 +55,9 @@ from protocols.wlr_layer_shell_unstable_v1 import (
     ZwlrLayerShellV1,
     ZwlrLayerSurfaceV1,
 )
+from protocols.wlr_screencopy_unstable_v1 import (
+    ZwlrScreencopyManagerV1,
+)
 from protocols.wayland import (
     WlCompositor,
     WlSeat,
@@ -175,6 +178,7 @@ XKB_KEY_period = 0x002e
 XKB_KEY_XF86AudioRaiseVolume = 0x1008FF13
 XKB_KEY_XF86AudioLowerVolume = 0x1008FF11
 XKB_KEY_XF86AudioMute = 0x1008FF12
+XKB_KEY_grave = 0x0060
 
 # Linux input event codes for pointer buttons
 BTN_LEFT = 0x110
@@ -781,6 +785,7 @@ class RiverWM:
         self.compositor_proxy = None   # WlCompositor proxy
         self.shm_proxy = None          # WlShm proxy
         self.layer_shell_bg_proxy = None  # ZwlrLayerShellV1 proxy
+        self.screencopy_proxy = None   # ZwlrScreencopyManagerV1 proxy
         self._wl_outputs: dict = {}    # global name -> WlOutput proxy
         self._wl_output_names: dict = {}  # id(WlOutput proxy) -> connector name
         self._initial_outputs_done: bool = False
@@ -804,6 +809,17 @@ class RiverWM:
 
         self.current_desktop_id: int = 1
         self.floating_active: bool = False
+
+        # Desktop preview overlay state
+        self.preview_active: bool = False
+        self.preview_surface = None       # wl_surface for the overlay
+        self.preview_layer_surface = None  # zwlr_layer_surface_v1
+        self.preview_configured: bool = False
+        self.preview_phys_w: int = 0
+        self.preview_phys_h: int = 0
+        self.preview_output = None        # OutputState for the preview
+        self.desktop_screenshots: dict = {}  # desktop_id -> PIL Image (scaled)
+        self._preview_render_pending: bool = False
 
         # Protocol sequence state
         self.in_manage: bool = False
@@ -898,6 +914,9 @@ class RiverWM:
         elif iface_name == "zwlr_layer_shell_v1":
             self.layer_shell_bg_proxy = registry.bind(id_num, ZwlrLayerShellV1, min(version, 4))
             logger.info("Bound zwlr_layer_shell_v1 — wallpaper layer shell enabled")
+        elif iface_name == "zwlr_screencopy_manager_v1":
+            self.screencopy_proxy = registry.bind(id_num, ZwlrScreencopyManagerV1, min(version, 3))
+            logger.info("Bound zwlr_screencopy_manager_v1 — screencopy enabled")
         elif iface_name == "wl_seat":
             self.wl_seat_proxy = registry.bind(id_num, WlSeat, min(version, 1))
             self.wl_seat_proxy.dispatcher["capabilities"] = self._on_wl_seat_capabilities
@@ -1093,6 +1112,9 @@ class RiverWM:
 
     def _on_output_removed(self, out: OutputState):
         out.removed = True
+        if out in self.outputs:
+            self.outputs.remove(out)
+        out.proxy.destroy()
         if out.layer_shell_output is not None:
             out.layer_shell_output.destroy()
             out.layer_shell_output = None
@@ -1102,6 +1124,17 @@ class RiverWM:
         if out.bg_surface is not None:
             out.bg_surface.destroy()
             out.bg_surface = None
+        # Clean up preview overlay if it belongs to this output
+        if self.preview_output is out:
+            if self.preview_layer_surface is not None:
+                self.preview_layer_surface.destroy()
+                self.preview_layer_surface = None
+            if self.preview_surface is not None:
+                self.preview_surface.destroy()
+                self.preview_surface = None
+            self.preview_configured = False
+            self.preview_active = False
+            self.preview_output = None
         if out.wl_output is not None:
             wl_id = id(out.wl_output)
             out.wl_output.release()
@@ -1192,6 +1225,8 @@ class RiverWM:
             out.bg_surface = None
         if out.width > 0 and out.height > 0:
             self._setup_wallpaper(out)
+        # Also recreate the preview overlay for this output
+        self._recreate_preview_overlay(out)
 
     def _setup_wallpaper(self, out: OutputState):
         """Create a layer surface background wallpaper for an output."""
@@ -1270,6 +1305,7 @@ class RiverWM:
             pool = self.shm_proxy.create_pool(fd, size)
             buf = pool.create_buffer(0, phys_w, phys_h, stride, WlShm.format.argb8888)
             os.close(fd)
+            buf.dispatcher["release"] = lambda p: p.destroy()
             surface.attach(buf, 0, 0)
             surface.damage(0, 0, out.width, out.height)
             surface.commit()
@@ -1322,6 +1358,7 @@ class RiverWM:
             pool = self.shm_proxy.create_pool(fd, 4)
             buf = pool.create_buffer(0, 1, 1, 4, WlShm.format.argb8888)
             os.close(fd)
+            buf.dispatcher["release"] = lambda p: p.destroy()
             surface.attach(buf, 0, 0)
             surface.damage(0, 0, 1, 1)
             surface.commit()
@@ -1336,6 +1373,333 @@ class RiverWM:
         layer_surface.dispatcher["closed"] = _on_closed
 
         surface.commit()
+
+    # -------------------------------------------------------------------
+    # Desktop preview overlay
+    # -------------------------------------------------------------------
+    def _recreate_preview_overlay(self, out: OutputState):
+        """Tear down and recreate the preview overlay for an output."""
+        if self.preview_layer_surface is not None:
+            self.preview_layer_surface.destroy()
+            self.preview_layer_surface = None
+        if self.preview_surface is not None:
+            self.preview_surface.destroy()
+            self.preview_surface = None
+        self.preview_configured = False
+        self.preview_active = False
+        if out.width > 0 and out.height > 0:
+            self._setup_preview_overlay(out)
+
+    def _setup_preview_overlay(self, out: OutputState):
+        """Create a layer surface overlay for desktop preview."""
+        if self.layer_shell_bg_proxy is None or self.compositor_proxy is None or self.shm_proxy is None:
+            return
+        if out.wl_output is None:
+            return
+
+        surface = self.compositor_proxy.create_surface()
+        self.preview_surface = surface
+        self.preview_output = out
+
+        # Create on overlay layer (above everything)
+        LAYER_OVERLAY = ZwlrLayerShellV1.layer.overlay
+        layer_surface = self.layer_shell_bg_proxy.get_layer_surface(
+            surface, out.wl_output, LAYER_OVERLAY, "desktop-preview"
+        )
+        self.preview_layer_surface = layer_surface
+
+        # Full screen, non-exclusive, no keyboard focus
+        ANCHOR_ALL = (ZwlrLayerSurfaceV1.anchor.top |
+                      ZwlrLayerSurfaceV1.anchor.bottom |
+                      ZwlrLayerSurfaceV1.anchor.left |
+                      ZwlrLayerSurfaceV1.anchor.right)
+        layer_surface.set_anchor(ANCHOR_ALL)
+        layer_surface.set_size(0, 0)
+        layer_surface.set_exclusive_zone(-1)
+        layer_surface.set_keyboard_interactivity(
+            ZwlrLayerSurfaceV1.keyboard_interactivity.none)
+
+        # Empty input region so pointer events pass through
+        empty_region = self.compositor_proxy.create_region()
+        surface.set_input_region(empty_region)
+        empty_region.destroy()
+
+        def _on_configure(proxy, serial, conf_w, conf_h):
+            layer_surface.ack_configure(serial)
+            # Use the compositor's configured dimensions and current output scale
+            cur_scale = max(out.scale, 1)
+            surface.set_buffer_scale(cur_scale)
+            self.preview_phys_w = conf_w * cur_scale
+            self.preview_phys_h = conf_h * cur_scale
+            self.preview_configured = True
+            # Commit to complete the configure handshake (keeps surface unmapped
+            # if no buffer is attached, or re-validates existing buffer)
+            if not self.preview_active:
+                surface.commit()
+            logger.info("Preview overlay configured %dx%d (scale %d, conf %dx%d)",
+                        self.preview_phys_w, self.preview_phys_h, cur_scale, conf_w, conf_h)
+
+        def _on_closed(proxy):
+            logger.info("Preview overlay layer surface closed")
+            self.preview_layer_surface = None
+            self.preview_surface = None
+            self.preview_configured = False
+            self.preview_active = False
+
+        layer_surface.dispatcher["configure"] = _on_configure
+        layer_surface.dispatcher["closed"] = _on_closed
+
+        # Initial commit triggers configure (no buffer attached = unmapped)
+        surface.commit()
+        logger.info("Preview overlay layer surface created for output %dx%d", out.width, out.height)
+
+    def _screencopy_capture(self, desktop_id: int):
+        """Request an async screencopy capture of the current output.
+
+        The capture completes via Wayland events (buffer → buffer_done → copy →
+        ready).  When ready, the screenshot is scaled to panel size and stored
+        in self.desktop_screenshots[desktop_id].
+
+        If a preview render is pending (self.preview_active and the overlay has
+        not yet been rendered), the ready callback triggers the render.
+        """
+        out = self.preview_output
+        if out is None or out.wl_output is None or self.screencopy_proxy is None:
+            return
+        if self.shm_proxy is None:
+            return
+
+        frame = self.screencopy_proxy.capture_output(0, out.wl_output)
+        # State for this capture (stored in closure)
+        cap = {"fmt": 0, "width": 0, "height": 0, "stride": 0,
+               "fd": -1, "pool": None, "buf": None, "desktop_id": desktop_id}
+
+        def _on_buffer(proxy, fmt, width, height, stride):
+            logger.debug("Screencopy buffer event: fmt=%d %dx%d stride=%d", fmt, width, height, stride)
+            cap["fmt"] = fmt
+            cap["width"] = width
+            cap["height"] = height
+            cap["stride"] = stride
+
+        def _on_buffer_done(proxy):
+            # Create shm buffer matching the compositor's requirements
+            size = cap["stride"] * cap["height"]
+            fd = os.memfd_create("wm2-screencopy")
+            os.ftruncate(fd, size)
+            cap["fd"] = fd
+            pool = self.shm_proxy.create_pool(fd, size)
+            cap["pool"] = pool
+            buf = pool.create_buffer(0, cap["width"], cap["height"],
+                                     cap["stride"], cap["fmt"])
+            cap["buf"] = buf
+            frame.copy(buf)
+
+        def _on_ready(proxy, tv_sec_hi, tv_sec_lo, tv_nsec):
+            # Read pixel data from shared memory
+            try:
+                from PIL import Image
+                fd = cap["fd"]
+                size = cap["stride"] * cap["height"]
+                os.lseek(fd, 0, os.SEEK_SET)
+                data = os.read(fd, size)
+                os.close(fd)
+                cap["fd"] = -1
+
+                # wl_shm format is XRGB8888 (0x34325258) = little-endian BGRX
+                # byte order.  Decode as RGB with BGRX stride, then convert.
+                w, h = cap["width"], cap["height"]
+                img = Image.frombytes("RGB", (w, h), data, "raw", "BGRX", cap["stride"]).convert("RGBA")
+
+                # Scale to panel size and cache
+                margin_x, gap, panel_w, panel_h, _ = self._preview_panel_geometry()
+                self.desktop_screenshots[cap["desktop_id"]] = img.resize(
+                    (panel_w, panel_h), Image.LANCZOS)
+                logger.debug("Screencopy captured desktop %d (%dx%d -> %dx%d)",
+                             cap["desktop_id"], w, h, panel_w, panel_h)
+            except Exception as e:
+                logger.warning("Screencopy ready handler failed: %s", e)
+                if cap["fd"] >= 0:
+                    os.close(cap["fd"])
+            finally:
+                if cap["buf"] is not None:
+                    cap["buf"].dispatcher["release"] = lambda p: p.destroy()
+                if cap["pool"] is not None:
+                    cap["pool"].destroy()
+                frame.destroy()
+
+            # If the preview is waiting for this capture, render now
+            if self.preview_active and self._preview_render_pending:
+                self._preview_render_pending = False
+                self._render_preview_composit()
+
+        def _on_failed(proxy):
+            logger.warning("Screencopy capture failed for desktop %d", cap["desktop_id"])
+            if cap["fd"] >= 0:
+                os.close(cap["fd"])
+            if cap["buf"] is not None:
+                cap["buf"].destroy()
+            if cap["pool"] is not None:
+                cap["pool"].destroy()
+            frame.destroy()
+
+        frame.dispatcher["buffer"] = _on_buffer
+        frame.dispatcher["buffer_done"] = _on_buffer_done
+        frame.dispatcher["flags"] = lambda p, f: None
+        frame.dispatcher["ready"] = _on_ready
+        frame.dispatcher["failed"] = _on_failed
+        frame.dispatcher["damage"] = lambda p, x, y, w, h: None
+        frame.dispatcher["linux_dmabuf"] = lambda p, f, w, h: None
+
+    def _preview_panel_geometry(self):
+        """Calculate panel dimensions for the preview overlay."""
+        out = self.preview_output
+        phys_w = self.preview_phys_w
+        phys_h = self.preview_phys_h
+        margin_x = int(phys_w * 0.05)
+        gap = int(phys_w * 0.02)
+        total_panels_w = phys_w - 2 * margin_x - 3 * gap
+        panel_w = total_panels_w // 4
+        panel_h = int(panel_w * (out.height / out.width))
+        y_top = (phys_h - panel_h) // 2
+        return margin_x, gap, panel_w, panel_h, y_top
+
+    def _render_preview(self):
+        """Request a screencopy capture, then render when ready.
+
+        If a cached screenshot for the current desktop already exists, renders
+        immediately.  Otherwise, fires a screencopy capture and sets a pending
+        flag so the ready-callback triggers the composit.
+        """
+        if self.current_desktop_id not in self.desktop_screenshots:
+            # No cache — request capture; the ready callback will composit
+            self._preview_render_pending = True
+            self._screencopy_capture(self.current_desktop_id)
+        else:
+            self._render_preview_composit()
+
+    def _render_preview_composit(self):
+        """Composit cached screenshots into the preview overlay and display it."""
+        if not self.preview_configured or self.preview_surface is None:
+            return
+
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+        except ImportError:
+            logger.warning("Pillow not installed; desktop preview disabled")
+            return
+
+        out = self.preview_output
+        if out is None:
+            return
+
+        phys_w = self.preview_phys_w
+        phys_h = self.preview_phys_h
+        scale = out.scale
+        margin_x, gap, panel_w, panel_h, y_top = self._preview_panel_geometry()
+
+        # Load font for placeholder labels
+        font_small = None
+        for font_path in ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                          "/usr/share/fonts/TTF/DejaVuSans.ttf",
+                          "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+                          "/usr/share/fonts/noto/NotoSans-Regular.ttf"):
+            if os.path.isfile(font_path):
+                try:
+                    font_small = ImageFont.truetype(font_path, 12 * scale)
+                    break
+                except Exception:
+                    pass
+        if font_small is None:
+            font_small = ImageFont.load_default()
+
+        img = Image.new("RGBA", (phys_w, phys_h), (0, 0, 0, 160))
+        draw = ImageDraw.Draw(img)
+
+        for i, desktop_id in enumerate(range(1, 5)):
+            desktop = self.desktops[desktop_id]
+            px = margin_x + i * (panel_w + gap)
+            is_current = (desktop_id == self.current_desktop_id)
+
+            # Panel border colors
+            bc = (0x52, 0x94, 0xE2, 0xFF) if is_current else (0x60, 0x65, 0x72, 0xFF)
+            bw = 3 * scale if is_current else 2 * scale
+
+            # Paste screenshot if we have one, otherwise draw placeholder
+            if desktop_id in self.desktop_screenshots:
+                thumb = self.desktop_screenshots[desktop_id]
+                if thumb.size != (panel_w, panel_h):
+                    thumb = thumb.resize((panel_w, panel_h), Image.LANCZOS)
+                    self.desktop_screenshots[desktop_id] = thumb
+                img.paste(thumb, (px, y_top))
+            else:
+                bg = (40, 60, 90, 220) if is_current else (35, 38, 48, 220)
+                draw.rectangle([px, y_top, px + panel_w, y_top + panel_h], fill=bg)
+                all_wins = desktop.all_windows()
+                info_y = y_top + 30 * scale
+                if not all_wins:
+                    draw.text((px + 6 * scale, info_y), "(empty)",
+                              fill=(120, 120, 120, 200), font=font_small)
+                else:
+                    for wi, win in enumerate(all_wins[:4]):
+                        label = (win.app_id or win.title or "?")[:16]
+                        draw.text((px + 6 * scale, info_y + wi * 14 * scale),
+                                  label, fill=(200, 200, 200, 220), font=font_small)
+
+            # Border (drawn on top of screenshot)
+            draw.rectangle([px, y_top, px + panel_w, y_top + panel_h],
+                           outline=bc, width=bw)
+
+
+        # Convert to BGRA pixel data and create wl_shm buffer
+        pixel_data = img.tobytes("raw", "BGRA")
+        del img
+
+        stride = phys_w * 4
+        size = stride * phys_h
+        fd = os.memfd_create("wm2-preview")
+        os.ftruncate(fd, size)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, pixel_data[:size])
+        pool = self.shm_proxy.create_pool(fd, size)
+        buf = pool.create_buffer(0, phys_w, phys_h, stride, WlShm.format.argb8888)
+        os.close(fd)
+
+        # Destroy the buffer when the compositor releases it
+        buf.dispatcher["release"] = lambda p: p.destroy()
+
+        cur_scale = max(out.scale, 1)
+        self.preview_surface.set_buffer_scale(cur_scale)
+        self.preview_surface.attach(buf, 0, 0)
+        self.preview_surface.damage(0, 0, phys_w // cur_scale, phys_h // cur_scale)
+        self.preview_surface.commit()
+        pool.destroy()
+        logger.debug("Preview overlay rendered %dx%d (scale %d)", phys_w, phys_h, cur_scale)
+
+    def _hide_preview(self):
+        """Hide the desktop preview overlay by destroying the layer surface."""
+        if self.preview_layer_surface is not None:
+            self.preview_layer_surface.destroy()
+            self.preview_layer_surface = None
+        if self.preview_surface is not None:
+            self.preview_surface.destroy()
+            self.preview_surface = None
+        self.preview_configured = False
+        self.preview_active = False
+        logger.debug("Preview overlay hidden (destroyed)")
+
+    def _action_toggle_preview(self):
+        """Toggle the desktop preview overlay on/off."""
+        if self.preview_active:
+            self._hide_preview()
+            # Recreate the overlay surface so it's ready for the next show
+            out = self.preview_output
+            if out is not None and out.width > 0 and out.height > 0:
+                self._setup_preview_overlay(out)
+        else:
+            if not self.preview_configured:
+                return
+            self.preview_active = True
+            self._render_preview()
 
     # -------------------------------------------------------------------
     # Seat events
@@ -1363,6 +1727,7 @@ class RiverWM:
     def _on_seat_removed(self, seat: SeatState):
         if seat in self.seats:
             self.seats.remove(seat)
+        seat.proxy.destroy()
         logger.info("Seat removed")
 
     def _on_pointer_enter(self, seat: SeatState, window_proxy):
@@ -2257,6 +2622,9 @@ class RiverWM:
         bind_pointer(BTN_LEFT, S, lambda: self._action_pointer_op("move"))
         bind_pointer(BTN_RIGHT, S, lambda: self._action_pointer_op("resize"))
 
+        # Desktop preview: Super+grave toggles overlay (auto-hides on desktop switch)
+        bind_key(XKB_KEY_grave, S, self._action_toggle_preview)
+
         # Request a manage sequence to enable bindings
         self.wm_proxy.manage_dirty()
 
@@ -2267,7 +2635,17 @@ class RiverWM:
     # -------------------------------------------------------------------
     def _action_switch_desktop(self, desktop_id: int):
         self._switch_desktop(desktop_id)
+        if self.preview_active:
+            self._hide_preview()
+            # Recreate overlay surface for next show
+            out = self.preview_output
+            if out is not None and out.width > 0 and out.height > 0:
+                self._setup_preview_overlay(out)
         self.wm_proxy.manage_dirty()
+        # Async screencopy capture of the new desktop (captures next frame,
+        # which will show the new desktop after manage/render completes)
+        if self.screencopy_proxy is not None and self.preview_output is not None:
+            self._screencopy_capture(desktop_id)
 
     def _action_move_to_desktop(self, desktop_id: int):
         focused = self._get_focused_window()
@@ -2548,6 +2926,7 @@ class RiverWM:
         def _on_keyboard_removed(proxy):
             if proxy in self.xkb_keyboards:
                 self.xkb_keyboards.remove(proxy)
+            proxy.destroy()
             logger.info("XKB keyboard removed")
 
         keyboard_proxy.dispatcher["removed"] = _on_keyboard_removed
