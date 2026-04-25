@@ -2862,6 +2862,10 @@ class RiverWM:
                 logger.warning("river_xkb_config_v1 not available; cannot apply XKB keymap")
             return
 
+        if self.xkb_keymap_obj is not None:
+            self.xkb_keymap_obj.destroy()
+            self.xkb_keymap_obj = None
+
         if not any((self.config.xkb_layout, self.config.xkb_model,
                      self.config.xkb_variant, self.config.xkb_options)):
             return
@@ -3073,9 +3077,27 @@ class RiverWM:
             else:
                 self.process_manager.terminate_all()
             self.process_manager.close_pipe()
+            
+        # Clean up Wayland protocol resources before disconnecting
+        try:
+            for binding, _ in self.key_bindings.values():
+                binding.destroy()
+            self.key_bindings.clear()
+            
+            for binding, _, _ in self.pointer_bindings.values():
+                binding.destroy()
+            self.pointer_bindings.clear()
+            
+            if self.xkb_keymap_obj is not None:
+                self.xkb_keymap_obj.destroy()
+                self.xkb_keymap_obj = None
+        except Exception as e:
+            logger.debug("Error destroying bindings/keymap on shutdown: %s", e)
+
         if self.wm_proxy:
             try:
                 self.wm_proxy.stop()
+                self.wm_proxy.destroy()
             except Exception:
                 pass
         if self.display:
