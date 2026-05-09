@@ -820,6 +820,8 @@ class RiverWM:
         self.preview_output = None        # OutputState for the preview
         self.desktop_screenshots: dict = {}  # desktop_id -> PIL Image (scaled)
         self._preview_render_pending: bool = False
+        self._screencopy_in_flight: bool = False
+        self._pending_preview_capture: Optional[int] = None
 
         # Protocol sequence state
         self.in_manage: bool = False
@@ -845,6 +847,7 @@ class RiverWM:
         self._saved_match_index: Optional[dict] = None
 
         self.running = True
+        self.restart_requested = False
         self.crash_reason: Optional[str] = None
 
     @property
@@ -871,7 +874,15 @@ class RiverWM:
     def connect(self):
         """Connect to the Wayland display and bind protocol globals."""
         self.display = Display()
-        self.display.connect()
+        try:
+            self.display.connect()
+        except ValueError as e:
+            display_name = os.environ.get("WAYLAND_DISPLAY")
+            if display_name:
+                logger.error("Unable to connect to Wayland display %r: %s", display_name, e)
+            else:
+                logger.error("Unable to connect to Wayland display: WAYLAND_DISPLAY is not set")
+            sys.exit(1)
         logger.info("Connected to Wayland display")
 
         self.registry = self.display.get_registry()
@@ -1453,7 +1464,7 @@ class RiverWM:
         surface.commit()
         logger.info("Preview overlay layer surface created for output %dx%d", out.width, out.height)
 
-    def _screencopy_capture(self, desktop_id: int):
+    def _screencopy_capture(self, desktop_id: int, *, preview_required: bool = False):
         """Request an async screencopy capture of the current output.
 
         The capture completes via Wayland events (buffer → buffer_done → copy →
@@ -1468,11 +1479,23 @@ class RiverWM:
             return
         if self.shm_proxy is None:
             return
+        if self._screencopy_in_flight:
+            if preview_required:
+                self._pending_preview_capture = desktop_id
+            return
 
+        self._screencopy_in_flight = True
         frame = self.screencopy_proxy.capture_output(0, out.wl_output)
         # State for this capture (stored in closure)
         cap = {"fmt": 0, "width": 0, "height": 0, "stride": 0,
                "fd": -1, "pool": None, "buf": None, "desktop_id": desktop_id}
+
+        def _finish_capture():
+            self._screencopy_in_flight = False
+            next_desktop = self._pending_preview_capture
+            self._pending_preview_capture = None
+            if next_desktop is not None and self.preview_active:
+                self._screencopy_capture(next_desktop, preview_required=True)
 
         def _on_buffer(proxy, fmt, width, height, stride):
             logger.debug("Screencopy buffer event: fmt=%d %dx%d stride=%d", fmt, width, height, stride)
@@ -1528,9 +1551,13 @@ class RiverWM:
                 frame.destroy()
 
             # If the preview is waiting for this capture, render now
-            if self.preview_active and self._preview_render_pending:
-                self._preview_render_pending = False
-                self._render_preview_composit()
+            try:
+                if (self.preview_active and self._preview_render_pending and
+                        cap["desktop_id"] == self.current_desktop_id):
+                    self._preview_render_pending = False
+                    self._render_preview_composit()
+            finally:
+                _finish_capture()
 
         def _on_failed(proxy):
             logger.warning("Screencopy capture failed for desktop %d", cap["desktop_id"])
@@ -1541,6 +1568,7 @@ class RiverWM:
             if cap["pool"] is not None:
                 cap["pool"].destroy()
             frame.destroy()
+            _finish_capture()
 
         frame.dispatcher["buffer"] = _on_buffer
         frame.dispatcher["buffer_done"] = _on_buffer_done
@@ -1566,16 +1594,13 @@ class RiverWM:
     def _render_preview(self):
         """Request a screencopy capture, then render when ready.
 
-        If a cached screenshot for the current desktop already exists, renders
-        immediately.  Otherwise, fires a screencopy capture and sets a pending
-        flag so the ready-callback triggers the composit.
+        Always refresh the current desktop before showing the overview. Cached
+        screenshots are still used for inactive desktops, but showing a stale
+        copy of the active desktop is misleading.
         """
-        if self.current_desktop_id not in self.desktop_screenshots:
-            # No cache — request capture; the ready callback will composit
-            self._preview_render_pending = True
-            self._screencopy_capture(self.current_desktop_id)
-        else:
-            self._render_preview_composit()
+        self.desktop_screenshots.pop(self.current_desktop_id, None)
+        self._preview_render_pending = True
+        self._screencopy_capture(self.current_desktop_id, preview_required=True)
 
     def _render_preview_composit(self):
         """Composit cached screenshots into the preview overlay and display it."""
@@ -1811,7 +1836,7 @@ class RiverWM:
 
     def _on_render_start(self, proxy):
         """Handle render_start event — apply rendering state changes."""
-        logger.debug(">>> render_start")
+        # logger.debug(">>> render_start")
         self.in_render = True
         self.in_manage = False
 
@@ -1821,7 +1846,7 @@ class RiverWM:
         # Finish render sequence
         self.wm_proxy.render_finish()
         self.in_render = False
-        logger.debug("<<< render_finish")
+        # logger.debug("<<< render_finish")
 
     # -------------------------------------------------------------------
     # Restart state restoration
@@ -2827,15 +2852,10 @@ class RiverWM:
         self._action_spawn("grim - | wl-copy -t image/png")
 
     def _action_restart_wm(self):
-        """Hot-reload: keep persistent processes alive, re-exec."""
-        logger.info("Hot-reloading WM (re-exec)...")
-        managed_pids = None
-        if self.process_manager:
-            managed_pids = self.process_manager.terminate_non_persistent()
-        _save_state(self, managed_pids=managed_pids)
-        self.shutdown(keep_persistent_processes=True)
-        python = sys.executable
-        os.execv(python, ["python3"] + sys.argv)
+        """Request a hot-reload from normal event-loop context."""
+        logger.info("Hot-reload requested")
+        self.restart_requested = True
+        self.running = False
 
     def _action_pointer_op(self, mode: str):
         if not self.seats:
@@ -2981,12 +3001,16 @@ class RiverWM:
         else:
             self._run_simple_loop()
 
+        if self.restart_requested:
+            logger.info("Event loop exited for hot-reload")
+            return
+
         logger.error("Event loop exited, self.running=%s", self.running)
         self.shutdown()
 
     def _run_simple_loop(self):
         """Original blocking dispatch loop (no managed processes)."""
-        while self.running:
+        while self.running and not self.restart_requested:
             try:
                 ret = self.display.dispatch(block=True)
                 if ret < 0:
@@ -3018,7 +3042,7 @@ class RiverWM:
         poller.register(wl_fd, select.POLLIN)
         poller.register(pipe_fd, select.POLLIN)
 
-        while self.running:
+        while self.running and not self.restart_requested:
             try:
                 # Dispatch any already-queued events and flush outgoing
                 self.display.dispatch(block=False)
@@ -3156,10 +3180,21 @@ def main():
 
     # SIGUSR1: hot-reload (re-exec)
     def sigusr1_handler(signum, frame):
-        wm._action_restart_wm()
+        wm.restart_requested = True
+        wm.running = False
     signal.signal(signal.SIGUSR1, sigusr1_handler)
 
     wm.run()
+
+    if wm.restart_requested:
+        logger.info("Hot-reloading WM (re-exec)...")
+        managed_pids = None
+        if wm.process_manager:
+            managed_pids = wm.process_manager.terminate_non_persistent()
+        _save_state(wm, managed_pids=managed_pids)
+        wm.shutdown(keep_persistent_processes=True)
+        python = sys.executable
+        os.execv(python, ["python3"] + sys.argv)
 
     # If we exited due to a crash, save state and re-exec
     if wm.crash_reason:
