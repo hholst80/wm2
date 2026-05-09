@@ -815,12 +815,18 @@ class RiverWM:
         self.preview_surface = None       # wl_surface for the overlay
         self.preview_layer_surface = None  # zwlr_layer_surface_v1
         self.preview_configured: bool = False
+        self._preview_overlay_generation: int = 0
         self.preview_phys_w: int = 0
         self.preview_phys_h: int = 0
         self.preview_output = None        # OutputState for the preview
         self.desktop_screenshots: dict = {}  # desktop_id -> PIL Image (scaled)
+        self._desktop_screenshot_defaults: set = set()
+        self._preview_background_key = None
+        self._preview_background_image = None
         self._preview_render_pending: bool = False
         self._screencopy_in_flight: bool = False
+        self._screencopy_started_at: float = 0.0
+        self._screencopy_generation: int = 0
         self._pending_preview_capture: Optional[int] = None
 
         # Protocol sequence state
@@ -1390,6 +1396,7 @@ class RiverWM:
     # -------------------------------------------------------------------
     def _recreate_preview_overlay(self, out: OutputState):
         """Tear down and recreate the preview overlay for an output."""
+        self._preview_overlay_generation += 1
         if self.preview_layer_surface is not None:
             self.preview_layer_surface.destroy()
             self.preview_layer_surface = None
@@ -1411,6 +1418,8 @@ class RiverWM:
         surface = self.compositor_proxy.create_surface()
         self.preview_surface = surface
         self.preview_output = out
+        self._preview_overlay_generation += 1
+        generation = self._preview_overlay_generation
 
         # Create on overlay layer (above everything)
         LAYER_OVERLAY = ZwlrLayerShellV1.layer.overlay
@@ -1436,6 +1445,8 @@ class RiverWM:
         empty_region.destroy()
 
         def _on_configure(proxy, serial, conf_w, conf_h):
+            if generation != self._preview_overlay_generation or surface is not self.preview_surface:
+                return
             layer_surface.ack_configure(serial)
             # Use the compositor's configured dimensions and current output scale
             cur_scale = max(out.scale, 1)
@@ -1443,6 +1454,7 @@ class RiverWM:
             self.preview_phys_w = conf_w * cur_scale
             self.preview_phys_h = conf_h * cur_scale
             self.preview_configured = True
+            self._initialize_preview_backgrounds()
             # Commit to complete the configure handshake (keeps surface unmapped
             # if no buffer is attached, or re-validates existing buffer)
             if not self.preview_active:
@@ -1451,11 +1463,14 @@ class RiverWM:
                         self.preview_phys_w, self.preview_phys_h, cur_scale, conf_w, conf_h)
 
         def _on_closed(proxy):
+            if generation != self._preview_overlay_generation or surface is not self.preview_surface:
+                return
             logger.info("Preview overlay layer surface closed")
             self.preview_layer_surface = None
             self.preview_surface = None
             self.preview_configured = False
             self.preview_active = False
+            self._preview_overlay_generation += 1
 
         layer_surface.dispatcher["configure"] = _on_configure
         layer_surface.dispatcher["closed"] = _on_closed
@@ -1464,7 +1479,7 @@ class RiverWM:
         surface.commit()
         logger.info("Preview overlay layer surface created for output %dx%d", out.width, out.height)
 
-    def _screencopy_capture(self, desktop_id: int, *, preview_required: bool = False):
+    def _screencopy_capture(self, desktop_id: int, *, preview_required: bool = False) -> bool:
         """Request an async screencopy capture of the current output.
 
         The capture completes via Wayland events (buffer → buffer_done → copy →
@@ -1476,22 +1491,43 @@ class RiverWM:
         """
         out = self.preview_output
         if out is None or out.wl_output is None or self.screencopy_proxy is None:
-            return
+            return False
         if self.shm_proxy is None:
-            return
+            return False
+        if self._screencopy_in_flight:
+            elapsed = time.monotonic() - self._screencopy_started_at
+            if elapsed > 1.0:
+                logger.warning("Abandoning stale screencopy capture after %.2fs", elapsed)
+                self._screencopy_generation += 1
+                self._screencopy_in_flight = False
+                self._pending_preview_capture = None
+            elif preview_required:
+                self._pending_preview_capture = desktop_id
+                return True
+            else:
+                return False
+
         if self._screencopy_in_flight:
             if preview_required:
                 self._pending_preview_capture = desktop_id
-            return
+                return True
+            return False
 
         self._screencopy_in_flight = True
+        self._screencopy_started_at = time.monotonic()
+        self._screencopy_generation += 1
+        generation = self._screencopy_generation
         frame = self.screencopy_proxy.capture_output(0, out.wl_output)
         # State for this capture (stored in closure)
         cap = {"fmt": 0, "width": 0, "height": 0, "stride": 0,
-               "fd": -1, "pool": None, "buf": None, "desktop_id": desktop_id}
+               "fd": -1, "pool": None, "buf": None, "desktop_id": desktop_id,
+               "generation": generation}
 
         def _finish_capture():
+            if cap["generation"] != self._screencopy_generation:
+                return
             self._screencopy_in_flight = False
+            self._screencopy_started_at = 0.0
             next_desktop = self._pending_preview_capture
             self._pending_preview_capture = None
             if next_desktop is not None and self.preview_active:
@@ -1537,6 +1573,7 @@ class RiverWM:
                 margin_x, gap, panel_w, panel_h, _ = self._preview_panel_geometry()
                 self.desktop_screenshots[cap["desktop_id"]] = img.resize(
                     (panel_w, panel_h), Image.LANCZOS)
+                self._desktop_screenshot_defaults.discard(cap["desktop_id"])
                 logger.debug("Screencopy captured desktop %d (%dx%d -> %dx%d)",
                              cap["desktop_id"], w, h, panel_w, panel_h)
             except Exception as e:
@@ -1552,7 +1589,8 @@ class RiverWM:
 
             # If the preview is waiting for this capture, render now
             try:
-                if (self.preview_active and self._preview_render_pending and
+                if (cap["generation"] == self._screencopy_generation and
+                        self.preview_active and self._preview_render_pending and
                         cap["desktop_id"] == self.current_desktop_id):
                     self._preview_render_pending = False
                     self._render_preview_composit()
@@ -1577,6 +1615,7 @@ class RiverWM:
         frame.dispatcher["failed"] = _on_failed
         frame.dispatcher["damage"] = lambda p, x, y, w, h: None
         frame.dispatcher["linux_dmabuf"] = lambda p, f, w, h: None
+        return True
 
     def _preview_panel_geometry(self):
         """Calculate panel dimensions for the preview overlay."""
@@ -1591,6 +1630,65 @@ class RiverWM:
         y_top = (phys_h - panel_h) // 2
         return margin_x, gap, panel_w, panel_h, y_top
 
+    def _preview_background_thumbnail(self, panel_w: int, panel_h: int):
+        """Return a wallpaper-based preview thumbnail, or black if unavailable."""
+        try:
+            from PIL import Image
+        except ImportError:
+            return None
+
+        wallpaper_path = self.config.wallpaper if self.config.wallpaper else ""
+        try:
+            wallpaper_mtime = os.path.getmtime(wallpaper_path) if wallpaper_path else 0
+        except OSError:
+            wallpaper_mtime = 0
+            wallpaper_path = ""
+
+        key = (wallpaper_path, wallpaper_mtime, panel_w, panel_h)
+        if self._preview_background_key == key and self._preview_background_image is not None:
+            return self._preview_background_image.copy()
+
+        if wallpaper_path:
+            try:
+                img = Image.open(wallpaper_path).convert("RGBA")
+                src_w, src_h = img.size
+                img_scale = max(panel_w / src_w, panel_h / src_h)
+                new_w = max(int(src_w * img_scale), 1)
+                new_h = max(int(src_h * img_scale), 1)
+                img = img.resize((new_w, new_h), Image.LANCZOS)
+                left = (new_w - panel_w) // 2
+                top = (new_h - panel_h) // 2
+                img = img.crop((left, top, left + panel_w, top + panel_h))
+            except Exception as e:
+                logger.warning("Failed to load preview background %s: %s", wallpaper_path, e)
+                img = Image.new("RGBA", (panel_w, panel_h), (0, 0, 0, 255))
+        else:
+            img = Image.new("RGBA", (panel_w, panel_h), (0, 0, 0, 255))
+
+        self._preview_background_key = key
+        self._preview_background_image = img
+        return img.copy()
+
+    def _initialize_preview_backgrounds(self):
+        """Seed uncaptured desktop previews with the configured desktop background."""
+        if not self.preview_configured:
+            return
+
+        _, _, panel_w, panel_h, _ = self._preview_panel_geometry()
+        if panel_w <= 0 or panel_h <= 0:
+            return
+
+        bg = self._preview_background_thumbnail(panel_w, panel_h)
+        if bg is None:
+            return
+
+        for desktop_id in range(1, 5):
+            thumb = self.desktop_screenshots.get(desktop_id)
+            if (thumb is None or desktop_id in self._desktop_screenshot_defaults or
+                    thumb.size != (panel_w, panel_h)):
+                self.desktop_screenshots[desktop_id] = bg.copy()
+                self._desktop_screenshot_defaults.add(desktop_id)
+
     def _render_preview(self):
         """Request a screencopy capture, then render when ready.
 
@@ -1599,12 +1697,16 @@ class RiverWM:
         copy of the active desktop is misleading.
         """
         self.desktop_screenshots.pop(self.current_desktop_id, None)
+        self._desktop_screenshot_defaults.discard(self.current_desktop_id)
+        self._initialize_preview_backgrounds()
         self._preview_render_pending = True
-        self._screencopy_capture(self.current_desktop_id, preview_required=True)
+        if not self._screencopy_capture(self.current_desktop_id, preview_required=True):
+            self._preview_render_pending = False
+            self._render_preview_composit()
 
     def _render_preview_composit(self):
         """Composit cached screenshots into the preview overlay and display it."""
-        if not self.preview_configured or self.preview_surface is None:
+        if not self.preview_configured or self.preview_surface is None or self.preview_layer_surface is None:
             return
 
         try:
@@ -1701,7 +1803,8 @@ class RiverWM:
         logger.debug("Preview overlay rendered %dx%d (scale %d)", phys_w, phys_h, cur_scale)
 
     def _hide_preview(self):
-        """Hide the desktop preview overlay by destroying the layer surface."""
+        """Hide the desktop preview overlay by destroying its layer role."""
+        self._preview_overlay_generation += 1
         if self.preview_layer_surface is not None:
             self.preview_layer_surface.destroy()
             self.preview_layer_surface = None
@@ -1710,13 +1813,13 @@ class RiverWM:
             self.preview_surface = None
         self.preview_configured = False
         self.preview_active = False
+        self._preview_render_pending = False
         logger.debug("Preview overlay hidden (destroyed)")
 
     def _action_toggle_preview(self):
         """Toggle the desktop preview overlay on/off."""
         if self.preview_active:
             self._hide_preview()
-            # Recreate the overlay surface so it's ready for the next show
             out = self.preview_output
             if out is not None and out.width > 0 and out.height > 0:
                 self._setup_preview_overlay(out)
@@ -2662,7 +2765,6 @@ class RiverWM:
         self._switch_desktop(desktop_id)
         if self.preview_active:
             self._hide_preview()
-            # Recreate overlay surface for next show
             out = self.preview_output
             if out is not None and out.width > 0 and out.height > 0:
                 self._setup_preview_overlay(out)
@@ -3142,6 +3244,14 @@ def _rotate_log():
         pass
 
 
+def _reexec_python() -> str:
+    """Return the Python executable to use for wm2 hot/crash re-exec."""
+    venv_python = os.path.join(_script_dir, ".venv", "bin", "python")
+    if os.path.exists(venv_python):
+        return venv_python
+    return sys.executable
+
+
 def main():
     _rotate_log()
 
@@ -3193,8 +3303,8 @@ def main():
             managed_pids = wm.process_manager.terminate_non_persistent()
         _save_state(wm, managed_pids=managed_pids)
         wm.shutdown(keep_persistent_processes=True)
-        python = sys.executable
-        os.execv(python, ["python3"] + sys.argv)
+        python = _reexec_python()
+        os.execv(python, [python] + sys.argv)
 
     # If we exited due to a crash, save state and re-exec
     if wm.crash_reason:
@@ -3214,8 +3324,8 @@ def main():
         except (OSError, json.JSONDecodeError):
             pass
         wm.shutdown(keep_persistent_processes=True)
-        python = sys.executable
-        os.execv(python, ["python3"] + sys.argv)
+        python = _reexec_python()
+        os.execv(python, [python] + sys.argv)
 
     sys.exit(1)
 
