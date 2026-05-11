@@ -100,18 +100,21 @@ def _save_state(wm, managed_pids: Optional[dict] = None) -> None:
         {"app_id": w.app_id, "title": w.title, "pos_x": w.pos_x, "pos_y": w.pos_y}
         for w in wm.floating_stack
     ]
-    popups = [
-        {"app_id": w.app_id, "title": w.title, "pos_x": w.pos_x, "pos_y": w.pos_y}
+    transient_windows = [
+        {"app_id": w.app_id, "title": w.title}
         for w in wm.popup_stack
+        if not w.closed
     ]
     state = {
-        "version": 2,
+        "version": 4,
         "current_desktop_id": wm.current_desktop_id,
         "floating_active": wm.floating_active,
         "floating_has_focus": wm.floating_has_focus,
         "desktops": desktops,
         "floating_stack": floating,
-        "popup_stack": popups,
+        # Dialogs/popups should not survive wm2 hot-reload. If they do, close
+        # the old surface on startup so the owning app can create a fresh one.
+        "transient_windows": transient_windows,
     }
     if managed_pids:
         state["managed_pids"] = managed_pids
@@ -598,6 +601,7 @@ class WindowState:
     pending_initial_dimensions: bool = True
     needs_resize_jolt: bool = False  # propose current dims once to force new configure
     closed: bool = False
+    popup_initial_proposed: bool = False
     # For interactive move/resize
     move_start_x: int = 0
     move_start_y: int = 0
@@ -851,6 +855,7 @@ class RiverWM:
         self._saved_state: Optional[dict] = None
         self._saved_state_idle_cycles: int = 0
         self._saved_match_index: Optional[dict] = None
+        self._saved_transient_index: Optional[dict] = None
 
         self.running = True
         self.restart_requested = False
@@ -1042,6 +1047,8 @@ class RiverWM:
         # Popup: re-center when real dimensions arrive
         if was_pending and changed and width > 0 and win.desktop_id == -1:
             self._position_popup_on_parent(win)
+            self.needs_layout = True
+            self.wm_proxy.manage_dirty()
             return
         if was_pending and changed and width > 0 and win.desktop_id > 0:
             desktop = self.desktops.get(win.desktop_id)
@@ -1915,6 +1922,7 @@ class RiverWM:
                 if self._saved_state_idle_cycles >= 2:
                     self._saved_state = None
                     self._saved_match_index = None
+                    self._saved_transient_index = None
                     logger.info("Restart state consumed")
             else:
                 self._saved_state_idle_cycles = 0
@@ -1982,8 +1990,27 @@ class RiverWM:
         self._saved_state = state
         self._saved_state_idle_cycles = 0
         self._saved_match_index = None
+        self._saved_transient_index = None
         logger.info("Applied restart state (desktop=%d, floating=%s)",
                      self.current_desktop_id, self.floating_active)
+
+    def _match_saved_transient(self, win: WindowState) -> bool:
+        """Return True once for transient windows that should be closed after restart."""
+        if self._saved_state is None:
+            return False
+        if self._saved_transient_index is None:
+            idx = defaultdict(list)
+            for entry in self._saved_state.get("transient_windows", []):
+                idx[(entry.get("app_id"), entry.get("title"))].append(entry)
+            # Compatibility with v2/v3 state files that persisted popups.
+            for entry in self._saved_state.get("popup_stack", []):
+                idx[(entry.get("app_id"), entry.get("title"))].append(entry)
+            self._saved_transient_index = idx
+        entries = self._saved_transient_index.get((win.app_id, win.title))
+        if entries:
+            entries.pop(0)
+            return True
+        return False
 
     def _match_saved_window(self, win: WindowState) -> Optional[dict]:
         """Match a window against saved state entries; returns entry or None."""
@@ -2007,10 +2034,6 @@ class RiverWM:
             # Index floating windows
             for entry in self._saved_state.get("floating_stack", []):
                 e = dict(entry, desktop_id=0, source="floating")
-                idx[(entry.get("app_id"), entry.get("title"))].append(e)
-            # Index popup windows
-            for entry in self._saved_state.get("popup_stack", []):
-                e = dict(entry, desktop_id=-1, source="popup")
                 idx[(entry.get("app_id"), entry.get("title"))].append(e)
             self._saved_match_index = idx
         key = (win.app_id, win.title)
@@ -2072,6 +2095,14 @@ class RiverWM:
             return
 
         # Check for saved restart state match
+        if self._match_saved_transient(win):
+            win.desktop_id = -1
+            win.proxy.set_tiled(EDGE_NONE)
+            win.proxy.close()
+            logger.info("Closing transient restart window %s/%s",
+                        win.app_id, win.title)
+            return
+
         saved = self._match_saved_window(win)
         if saved is not None:
             self._restore_window_from_saved(win, saved)
@@ -2473,9 +2504,12 @@ class RiverWM:
         for win in self.popup_stack:
             if not win.closed:
                 win.proxy.set_tiled(EDGE_NONE)
-                if win.width == 0 and win.height == 0:
-                    # Initial state: no dimensions proposal, client picks its size
-                    pass
+                if win.width == 0 and win.height == 0 and not win.popup_initial_proposed:
+                    # New windows are not displayed until they receive a
+                    # dimensions proposal. 0x0 asks the client to choose its
+                    # natural dialog size.
+                    win.proxy.propose_dimensions(0, 0)
+                    win.popup_initial_proposed = True
 
         # Set focus
         if seat and focused and not focused.closed:
@@ -2604,6 +2638,9 @@ class RiverWM:
         """Layout popup/dialog windows (always on top)."""
         for win in reversed(self.popup_stack):
             if win.closed:
+                continue
+            if win.width == 0 or win.height == 0:
+                win.proxy.hide()
                 continue
             win.proxy.show()
             if win.node:
