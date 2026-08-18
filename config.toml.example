@@ -28,12 +28,13 @@ variant = "altgr-intl"
 options = "ctrl:nocaps,compose:rctrl"
 
 # Volume control — commands run when XF86Audio keys (e.g. a volume knob) are
-# pressed. Set any value to "" to disable that binding. Defaults use wpctl
-# (PipeWire). For PulseAudio, use pactl equivalents.
+# pressed. Set any value to "" to disable that binding. The defaults try
+# wpctl first, then fall back to pactl.
 [volume]
-up = "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+"
-down = "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"
-mute = "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
+up = "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+ 2>/dev/null || pactl set-sink-volume @DEFAULT_SINK@ +5%"
+down = "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%- 2>/dev/null || pactl set-sink-volume @DEFAULT_SINK@ -5%"
+mute = "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle 2>/dev/null || pactl set-sink-mute @DEFAULT_SINK@ toggle"
+mic_mute = "wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle 2>/dev/null || pactl set-source-mute @DEFAULT_SOURCE@ toggle"
 
 # Managed processes — started after protocol binding, restarted on crash.
 # Fields: cmd (required), restart (bool, default true),

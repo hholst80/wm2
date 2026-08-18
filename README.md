@@ -16,6 +16,8 @@ A window manager for the [River](https://codeberg.org/river/river) Wayland compo
 | **Max** | The focused window occupies the entire usable area (respects panels/bars). Only one window is visible at a time. |
 | **2-Split** | The output is divided into a left and right stack separated by a vertical split. Each side has its own ordered stack; only the top window on each side is visible. New windows are auto-balanced to the empty side when the focused side already has a window. |
 
+Application fullscreen requests, such as Google Chrome's F11 mode, use the same Fullscreen layout and restore the previous desktop layout when the application exits fullscreen.
+
 **Popup/Dialog Layer.** Dialog windows are automatically detected and rendered as small floating popups on top of the current view. Detection works via the `parent` property (xdg-toplevel parent) or size-based heuristics (windows dramatically smaller than their tile area). Popups can be moved with `Super + Left Click`, closed with `Super + Q`, and cycled with `Super + J/K` when focused. Clicking a background window shifts keyboard focus there while the popup stays visible; clicking the popup re-focuses it. Popup positions are preserved across hot-reload.
 
 **Focus Management.** Keyboard focus is explicitly managed by the WM. In max/fullscreen modes, focus is always on the single visible window. In 2-split mode, focus is on one of the two visible windows and can be moved between sides.
@@ -141,6 +143,7 @@ All bindings use the **Super** (Logo) key as the primary modifier.
 | `XF86AudioRaiseVolume` | Volume up (configurable) |
 | `XF86AudioLowerVolume` | Volume down (configurable) |
 | `XF86AudioMute` | Toggle mute (configurable) |
+| `XF86AudioMicMute` | Toggle microphone mute (configurable) |
 | `Super + Left Click` | Interactive move (floating/popup windows) |
 | `Super + Right Click` | Interactive resize (floating/popup windows) |
 
@@ -177,11 +180,12 @@ options = "ctrl:nocaps,compose:rctrl"
 
 # Volume control — commands run when XF86Audio keys are pressed.
 # Set any value to "" to disable that binding.
-# Defaults use wpctl (PipeWire).
+# Defaults try wpctl first, then fall back to pactl.
 [volume]
-up = "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+"
-down = "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"
-mute = "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
+up = "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+ 2>/dev/null || pactl set-sink-volume @DEFAULT_SINK@ +5%"
+down = "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%- 2>/dev/null || pactl set-sink-volume @DEFAULT_SINK@ -5%"
+mute = "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle 2>/dev/null || pactl set-sink-mute @DEFAULT_SINK@ toggle"
+mic_mute = "wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle 2>/dev/null || pactl set-source-mute @DEFAULT_SOURCE@ toggle"
 
 # Managed processes — started after protocol binding, restarted on crash.
 # One-shot commands (restart = false) run once after protocols are bound.

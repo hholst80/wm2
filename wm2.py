@@ -83,21 +83,40 @@ def _state_file_path() -> str:
 
 def _save_state(wm, managed_pids: Optional[dict] = None) -> None:
     """Serialize WM state to JSON before re-exec."""
+    def window_entry(win, **extra):
+        entry = {
+            "app_id": win.app_id,
+            "title": win.title,
+            "side": win.side.value,
+            "client_fullscreen": win.client_fullscreen,
+            "is_informed_fullscreen": win.is_informed_fullscreen,
+        }
+        if win.client_fullscreen_restore_width > 0:
+            entry["client_fullscreen_restore_width"] = win.client_fullscreen_restore_width
+        if win.client_fullscreen_restore_height > 0:
+            entry["client_fullscreen_restore_height"] = win.client_fullscreen_restore_height
+        entry.update(extra)
+        return entry
+
     desktops = {}
     for did, desktop in wm.desktops.items():
-        win_entries = [{"app_id": w.app_id, "title": w.title} for w in desktop.windows]
-        left_entries = [{"app_id": w.app_id, "title": w.title, "side": "left"} for w in desktop.left_stack]
-        right_entries = [{"app_id": w.app_id, "title": w.title, "side": "right"} for w in desktop.right_stack]
+        win_entries = [window_entry(w) for w in desktop.windows]
+        left_entries = [window_entry(w, side="left") for w in desktop.left_stack]
+        right_entries = [window_entry(w, side="right") for w in desktop.right_stack]
         desktops[str(did)] = {
             "layout": desktop.layout.value,
             "focused_index": desktop.focused_index,
             "focused_side": desktop.focused_side.value,
+            "client_fullscreen_restore_layout": (
+                desktop.client_fullscreen_restore_layout.value
+                if desktop.client_fullscreen_restore_layout is not None else None
+            ),
             "windows": win_entries,
             "left_stack": left_entries,
             "right_stack": right_entries,
         }
     floating = [
-        {"app_id": w.app_id, "title": w.title, "pos_x": w.pos_x, "pos_y": w.pos_y}
+        window_entry(w, pos_x=w.pos_x, pos_y=w.pos_y)
         for w in wm.floating_stack
     ]
     transient_windows = [
@@ -106,7 +125,7 @@ def _save_state(wm, managed_pids: Optional[dict] = None) -> None:
         if not w.closed
     ]
     state = {
-        "version": 4,
+        "version": 5,
         "current_desktop_id": wm.current_desktop_id,
         "floating_active": wm.floating_active,
         "floating_has_focus": wm.floating_has_focus,
@@ -181,6 +200,7 @@ XKB_KEY_period = 0x002e
 XKB_KEY_XF86AudioRaiseVolume = 0x1008FF13
 XKB_KEY_XF86AudioLowerVolume = 0x1008FF11
 XKB_KEY_XF86AudioMute = 0x1008FF12
+XKB_KEY_XF86AudioMicMute = 0x1008FFB2
 XKB_KEY_grave = 0x0060
 
 # Linux input event codes for pointer buttons
@@ -247,9 +267,22 @@ class Config:
     xcursor_theme: str = ""  # cursor theme name, empty = XCURSOR_THEME or "Adwaita"
     xcursor_size: int = 0    # cursor size in pixels, 0 = XCURSOR_SIZE or 24
     wallpaper: str = ""      # path to wallpaper image, empty = no wallpaper
-    volume_up: str = "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+"
-    volume_down: str = "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"
-    volume_mute: str = "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
+    volume_up: str = (
+        "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+ 2>/dev/null"
+        " || pactl set-sink-volume @DEFAULT_SINK@ +5%"
+    )
+    volume_down: str = (
+        "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%- 2>/dev/null"
+        " || pactl set-sink-volume @DEFAULT_SINK@ -5%"
+    )
+    volume_mute: str = (
+        "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle 2>/dev/null"
+        " || pactl set-sink-mute @DEFAULT_SINK@ toggle"
+    )
+    mic_mute: str = (
+        "wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle 2>/dev/null"
+        " || pactl set-source-mute @DEFAULT_SOURCE@ toggle"
+    )
     processes: list = field(default_factory=list)  # list of ProcessConfig
 
     @classmethod
@@ -287,6 +320,7 @@ class Config:
                 cfg.volume_up = vol.get("up", cfg.volume_up)
                 cfg.volume_down = vol.get("down", cfg.volume_down)
                 cfg.volume_mute = vol.get("mute", cfg.volume_mute)
+                cfg.mic_mute = vol.get("mic_mute", cfg.mic_mute)
                 if cfg.wallpaper:
                     cfg.wallpaper = os.path.expanduser(cfg.wallpaper)
                 layout_str = data.get("default_layout", cfg.default_layout.value)
@@ -597,7 +631,15 @@ class WindowState:
     parent: Optional["WindowState"] = None
     desktop_id: int = 1  # 1-4, 0 for floating overlay, -1 for popup/dialog
     side: Side = Side.LEFT  # only meaningful in split mode
+    # River tracks the physical fullscreen placement and the fullscreen state
+    # reported to the application independently.
     is_fullscreen: bool = False
+    is_informed_fullscreen: bool = False
+    client_fullscreen: bool = False
+    # Floating windows retain their pre-fullscreen size so exit_fullscreen can
+    # propose it in the same manage sequence while leaving pos_x/pos_y intact.
+    client_fullscreen_restore_width: int = 0
+    client_fullscreen_restore_height: int = 0
     pending_initial_dimensions: bool = True
     needs_resize_jolt: bool = False  # propose current dims once to force new configure
     closed: bool = False
@@ -623,6 +665,10 @@ class Desktop:
     left_stack: list = field(default_factory=list)   # ordered, [0] = top
     right_stack: list = field(default_factory=list)
     focused_side: Side = Side.LEFT
+    # Application-requested fullscreen (for example Chrome F11) temporarily
+    # borrows the desktop fullscreen layout and restores this mode on exit.
+    client_fullscreen_window: Optional[WindowState] = None
+    client_fullscreen_restore_layout: Optional[LayoutMode] = None
 
     def all_windows(self) -> list:
         """Return all windows on this desktop."""
@@ -633,27 +679,32 @@ class Desktop:
     def add_window(self, win: WindowState):
         """Add a window to the top of the appropriate stack."""
         if self.layout == LayoutMode.SPLIT:
-            # Auto-balance: if focused side has windows and other side is empty,
-            # place on the empty side for natural split distribution
-            left_has = len(self.left_stack) > 0
-            right_has = len(self.right_stack) > 0
-            if self.focused_side == Side.LEFT and left_has and not right_has:
-                self.right_stack.insert(0, win)
-                win.side = Side.RIGHT
-                self.focused_side = Side.RIGHT
-            elif self.focused_side == Side.RIGHT and right_has and not left_has:
-                self.left_stack.insert(0, win)
-                win.side = Side.LEFT
-                self.focused_side = Side.LEFT
-            elif self.focused_side == Side.LEFT:
-                self.left_stack.insert(0, win)
-                win.side = Side.LEFT
-            else:
-                self.right_stack.insert(0, win)
-                win.side = Side.RIGHT
+            self._assign_split_side(win, self.left_stack + self.right_stack)
+            stack = self.left_stack if win.side == Side.LEFT else self.right_stack
+            stack.insert(0, win)
         else:
+            # Client fullscreen temporarily stores a split desktop in the
+            # single-stack representation. Give windows opened during that
+            # interval the side normal split placement would have chosen, so
+            # restoring the borrowed layout does not collect them all left.
+            if (self.layout == LayoutMode.FULLSCREEN
+                    and self.client_fullscreen_restore_layout == LayoutMode.SPLIT):
+                self._assign_split_side(win, self.windows)
             self.windows.insert(0, win)
             self.focused_index = 0
+
+    def _assign_split_side(self, win: WindowState, existing: list):
+        """Assign the side split auto-placement would use for a new window."""
+        left_has = any(w.side == Side.LEFT for w in existing)
+        right_has = any(w.side == Side.RIGHT for w in existing)
+        if self.focused_side == Side.LEFT and left_has and not right_has:
+            win.side = Side.RIGHT
+            self.focused_side = Side.RIGHT
+        elif self.focused_side == Side.RIGHT and right_has and not left_has:
+            win.side = Side.LEFT
+            self.focused_side = Side.LEFT
+        else:
+            win.side = self.focused_side
 
     def remove_window(self, win: WindowState):
         """Remove a window from whatever stack it's in."""
@@ -687,11 +738,19 @@ class Desktop:
         else:
             self.right_stack.insert(0, win)
 
-    def migrate_to_split(self):
+    def migrate_to_split(self, preserve_sides: bool = False):
         """When switching to split mode, distribute windows to left/right."""
         all_wins = list(self.windows)
         self.left_stack.clear()
         self.right_stack.clear()
+
+        if preserve_sides:
+            for win in all_wins:
+                if win.side == Side.LEFT:
+                    self.left_stack.append(win)
+                else:
+                    self.right_stack.append(win)
+            return
 
         has_left = any(w.side == Side.LEFT for w in all_wins)
         has_right = any(w.side == Side.RIGHT for w in all_wins)
@@ -838,6 +897,7 @@ class RiverWM:
         self.in_render: bool = False
         self.needs_layout: bool = True
         self.pending_new_windows: list = []
+        self.pending_client_fullscreen_requests: list = []  # (WindowState, enter)
         self.pending_bindings_to_enable: list = []
 
         # Keybinding registry
@@ -856,6 +916,7 @@ class RiverWM:
         self._saved_state_idle_cycles: int = 0
         self._saved_match_index: Optional[dict] = None
         self._saved_transient_index: Optional[dict] = None
+        self._canceled_restart_fullscreen_locations: set = set()
 
         self.running = True
         self.restart_requested = False
@@ -998,6 +1059,12 @@ class RiverWM:
         window_proxy.dispatcher["pointer_move_requested"] = lambda p, seat: self._on_pointer_move_requested(win, seat)
         window_proxy.dispatcher["pointer_resize_requested"] = lambda p, seat, edges: self._on_pointer_resize_requested(win, seat, edges)
         window_proxy.dispatcher["activation_requested"] = lambda p: self._on_activation_requested(win)
+        window_proxy.dispatcher["fullscreen_requested"] = (
+            lambda p, output: self._on_fullscreen_requested(win, output)
+        )
+        window_proxy.dispatcher["exit_fullscreen_requested"] = (
+            lambda p: self._on_exit_fullscreen_requested(win)
+        )
         self.pending_new_windows.append(win)
         logger.info("New window created: %s", id(window_proxy))
 
@@ -1081,6 +1148,13 @@ class RiverWM:
                         win.needs_resize_jolt = True
                         logger.info("Window %s initial size %dx%d < tile %dx%d, scheduling jolt",
                                     win.app_id, width, height, tile_w, ua[3])
+                # A 0x0 fullscreen window is deliberately configured at the
+                # usable size before River fullscreen is requested. Once that
+                # first size arrives, schedule the manage pass that performs
+                # the actual fullscreen transition.
+                if desktop.layout == LayoutMode.FULLSCREEN:
+                    self.needs_layout = True
+                    self.wm_proxy.manage_dirty()
                 return
         if changed:
             self.needs_layout = True
@@ -1110,6 +1184,20 @@ class RiverWM:
         if seat:
             self._focus_window(seat, win)
 
+    def _on_fullscreen_requested(self, win: WindowState, output_proxy):
+        """Queue an application fullscreen request for the next manage sequence."""
+        if win.closed:
+            return
+        logger.info("Fullscreen requested: app_id=%s title=%s", win.app_id, win.title)
+        self.pending_client_fullscreen_requests.append((win, True))
+
+    def _on_exit_fullscreen_requested(self, win: WindowState):
+        """Queue an application fullscreen exit for the next manage sequence."""
+        if win.closed:
+            return
+        logger.info("Fullscreen exit requested: app_id=%s title=%s", win.app_id, win.title)
+        self.pending_client_fullscreen_requests.append((win, False))
+
     # -------------------------------------------------------------------
     # Output events
     # -------------------------------------------------------------------
@@ -1138,6 +1226,11 @@ class RiverWM:
         out.removed = True
         if out in self.outputs:
             self.outputs.remove(out)
+        # River implicitly exits every window fullscreen on a removed output.
+        # Keep the logical layout/client ownership, but forget the compositor
+        # state so the next output's manage sequence reapplies fullscreen.
+        for win in self.windows.values():
+            win.is_fullscreen = False
         out.proxy.destroy()
         if out.layer_shell_output is not None:
             out.layer_shell_output.destroy()
@@ -1915,11 +2008,17 @@ class RiverWM:
                 self._place_new_window(win)
         self.pending_new_windows.clear()
 
+        # Fullscreen request events are followed by manage_start. Apply them
+        # here so all fullscreen protocol requests remain inside the manage
+        # sequence.
+        self._apply_client_fullscreen_requests()
+
         # Track idle cycles for restart state cleanup
         if self._saved_state is not None:
             if not had_new_windows:
                 self._saved_state_idle_cycles += 1
                 if self._saved_state_idle_cycles >= 2:
+                    self._restore_orphaned_restart_fullscreen_layouts()
                     self._saved_state = None
                     self._saved_match_index = None
                     self._saved_transient_index = None
@@ -1962,6 +2061,24 @@ class RiverWM:
     # -------------------------------------------------------------------
     # Restart state restoration
     # -------------------------------------------------------------------
+    def _restore_orphaned_restart_fullscreen_layouts(self):
+        """Release borrowed layouts whose saved fullscreen owner never returned."""
+        for desktop in self.desktops.values():
+            restore_layout = desktop.client_fullscreen_restore_layout
+            if restore_layout is None or desktop.client_fullscreen_window is not None:
+                continue
+            desktop.client_fullscreen_restore_layout = None
+            self._set_layout_mode(
+                restore_layout,
+                desktop=desktop,
+                preserve_split_sides=restore_layout == LayoutMode.SPLIT,
+            )
+            logger.info(
+                "Fullscreen owner did not return after restart; restored "
+                "desktop %d to %s",
+                desktop.id, restore_layout.value,
+            )
+
     def _load_restart_state(self, state: dict):
         """Apply non-window state from a restart state dict."""
         self.current_desktop_id = state.get("current_desktop_id", 1)
@@ -1985,6 +2102,12 @@ class RiverWM:
             if side_val:
                 try:
                     desktop.focused_side = Side(side_val)
+                except ValueError:
+                    pass
+            restore_layout_val = dstate.get("client_fullscreen_restore_layout")
+            if restore_layout_val:
+                try:
+                    desktop.client_fullscreen_restore_layout = LayoutMode(restore_layout_val)
                 except ValueError:
                     pass
         self._saved_state = state
@@ -2022,15 +2145,20 @@ class RiverWM:
             # Index desktop windows
             for did_str, dstate in self._saved_state.get("desktops", {}).items():
                 did = int(did_str)
-                for entry in dstate.get("windows", []):
-                    e = dict(entry, desktop_id=did, source="windows")
-                    idx[(entry.get("app_id"), entry.get("title"))].append(e)
-                for entry in dstate.get("left_stack", []):
-                    e = dict(entry, desktop_id=did, source="left_stack")
-                    idx[(entry.get("app_id"), entry.get("title"))].append(e)
-                for entry in dstate.get("right_stack", []):
-                    e = dict(entry, desktop_id=did, source="right_stack")
-                    idx[(entry.get("app_id"), entry.get("title"))].append(e)
+                # The inactive representation is intentionally retained while
+                # switching layouts, so only index the lists used by the saved
+                # layout. This avoids matching the same live window twice.
+                if dstate.get("layout") == LayoutMode.SPLIT.value:
+                    sources = (
+                        ("left_stack", dstate.get("left_stack", [])),
+                        ("right_stack", dstate.get("right_stack", [])),
+                    )
+                else:
+                    sources = (("windows", dstate.get("windows", [])),)
+                for source, entries in sources:
+                    for entry in entries:
+                        e = dict(entry, desktop_id=did, source=source)
+                        idx[(entry.get("app_id"), entry.get("title"))].append(e)
             # Index floating windows
             for entry in self._saved_state.get("floating_stack", []):
                 e = dict(entry, desktop_id=0, source="floating")
@@ -2046,6 +2174,58 @@ class RiverWM:
         """Place a window according to saved state entry."""
         did = saved["desktop_id"]
         source = saved["source"]
+        side_val = saved.get("side")
+        if side_val:
+            try:
+                win.side = Side(side_val)
+            except ValueError:
+                pass
+        win.client_fullscreen = saved.get("client_fullscreen", False)
+        win.is_informed_fullscreen = saved.get(
+            "is_informed_fullscreen", win.client_fullscreen
+        )
+        win.client_fullscreen_restore_width = saved.get(
+            "client_fullscreen_restore_width", 0
+        )
+        win.client_fullscreen_restore_height = saved.get(
+            "client_fullscreen_restore_height", 0
+        )
+        if (win.client_fullscreen
+                and did in self._canceled_restart_fullscreen_locations):
+            # An explicit layout choice made while restart restoration was
+            # pending is newer than this saved request. Keep the informed flag
+            # so the normal stale-state pass tells the returning client that
+            # fullscreen was canceled. River may also retain the physical
+            # fullscreen placement across the manager restart, so force the
+            # stale-state pass to send exit_fullscreen as well.
+            win.client_fullscreen = False
+            win.is_fullscreen = True
+            logger.info(
+                "Discarded canceled restart fullscreen ownership for %s",
+                win.app_id,
+            )
+        if win.client_fullscreen:
+            other_owner = next(
+                (
+                    other for other in self.windows.values()
+                    if other is not win and other.client_fullscreen
+                    and not other.closed
+                ),
+                None,
+            )
+            if other_owner is not None:
+                # A request received after restart state was loaded takes
+                # precedence over the older saved ownership. Keeping the
+                # informed flag lets the normal stale-state pass tell this
+                # returning client that it is no longer fullscreen. Force a
+                # physical exit too in case River retained it across restart.
+                win.client_fullscreen = False
+                win.is_fullscreen = True
+                logger.info(
+                    "Discarded saved fullscreen ownership for %s; %s has "
+                    "a newer request",
+                    win.app_id, other_owner.app_id,
+                )
         if did == -1 or source == "popup":
             # Popup/dialog window
             win.desktop_id = -1
@@ -2061,6 +2241,9 @@ class RiverWM:
             self.floating_stack.append(win)
             win.pos_x = saved.get("pos_x", 0)
             win.pos_y = saved.get("pos_y", 0)
+            if win.client_fullscreen:
+                self.floating_active = True
+                self.floating_has_focus = True
             logger.info("Restored floating window %s/%s at (%d,%d)",
                         win.app_id, win.title, win.pos_x, win.pos_y)
         else:
@@ -2080,10 +2263,28 @@ class RiverWM:
                 logger.info("Restored window %s/%s on desktop %d right_stack",
                             win.app_id, win.title, did)
             else:
-                # MAX or FULLSCREEN layout — use windows list
-                desktop.windows.append(win)
-                logger.info("Restored window %s/%s on desktop %d windows",
-                            win.app_id, win.title, did)
+                # A pending saved fullscreen layout can be superseded before
+                # all windows return. Honor the desktop's current structure if
+                # that happened rather than appending to an inactive list.
+                if desktop.layout == LayoutMode.SPLIT:
+                    stack = (
+                        desktop.left_stack
+                        if win.side == Side.LEFT else desktop.right_stack
+                    )
+                    stack.append(win)
+                    logger.info(
+                        "Restored window %s/%s on desktop %d %s_stack",
+                        win.app_id, win.title, did, win.side.value,
+                    )
+                else:
+                    desktop.windows.append(win)
+                    logger.info("Restored window %s/%s on desktop %d windows",
+                                win.app_id, win.title, did)
+            if win.client_fullscreen:
+                if desktop.client_fullscreen_restore_layout is None:
+                    desktop.client_fullscreen_restore_layout = desktop.layout
+                desktop.client_fullscreen_window = win
+                self._set_layout_mode(LayoutMode.FULLSCREEN, desktop=desktop)
 
     # -------------------------------------------------------------------
     # Window placement
@@ -2254,6 +2455,11 @@ class RiverWM:
             if desktop:
                 desktop.remove_window(win)
 
+        # Closing or relocating a client-fullscreen window cancels the
+        # temporary ownership. _apply_manage_state globally exits the stale
+        # compositor fullscreen state before applying its new location.
+        self._end_client_fullscreen_tracking(win)
+
     # -------------------------------------------------------------------
     # Focus management
     # -------------------------------------------------------------------
@@ -2314,6 +2520,9 @@ class RiverWM:
         """Get the currently focused window."""
         if self.popup_has_focus and self.popup_stack:
             return self.popup_stack[0]
+        client_fullscreen = self._active_client_fullscreen_window()
+        if client_fullscreen is not None:
+            return client_fullscreen
         if self.floating_active and self.floating_has_focus and self.floating_stack:
             return self.floating_stack[0]
         return self.current_desktop.get_focused_window()
@@ -2365,27 +2574,25 @@ class RiverWM:
     # -------------------------------------------------------------------
     # Layout mode switching
     # -------------------------------------------------------------------
-    def _set_layout_mode(self, mode: LayoutMode):
+    def _set_layout_mode(
+        self,
+        mode: LayoutMode,
+        desktop: Optional[Desktop] = None,
+        preserve_split_sides: bool = False,
+    ):
         """Switch the current desktop's layout mode."""
-        desktop = self.current_desktop
+        if desktop is None:
+            desktop = self.current_desktop
         old_mode = desktop.layout
 
         if old_mode == mode:
             return
 
-        # Handle fullscreen exit
-        if old_mode == LayoutMode.FULLSCREEN:
-            for win in desktop.windows:
-                if win.is_fullscreen:
-                    win.proxy.exit_fullscreen()
-                    win.proxy.inform_not_fullscreen()
-                    win.is_fullscreen = False
-
         # Migrate window stacks
         if old_mode == LayoutMode.SPLIT and mode != LayoutMode.SPLIT:
             desktop.migrate_from_split()
         elif old_mode != LayoutMode.SPLIT and mode == LayoutMode.SPLIT:
-            desktop.migrate_to_split()
+            desktop.migrate_to_split(preserve_sides=preserve_split_sides)
 
         desktop.layout = mode
         self.needs_layout = True
@@ -2395,9 +2602,145 @@ class RiverWM:
 
         logger.info("Desktop %d layout changed to %s", desktop.id, mode.value)
 
+    def _end_client_fullscreen_tracking(self, win: WindowState) -> bool:
+        """Clear client fullscreen ownership and restore any borrowed layout."""
+        was_tracked = win.client_fullscreen
+        win.client_fullscreen = False
+
+        for desktop in self.desktops.values():
+            if desktop.client_fullscreen_window is not win:
+                continue
+            restore_layout = (
+                desktop.client_fullscreen_restore_layout or LayoutMode.MAX
+            )
+            desktop.client_fullscreen_window = None
+            desktop.client_fullscreen_restore_layout = None
+            self._set_layout_mode(
+                restore_layout,
+                desktop=desktop,
+                preserve_split_sides=restore_layout == LayoutMode.SPLIT,
+            )
+            logger.info(
+                "Released client fullscreen for %s; restored desktop %d to %s",
+                win.app_id, desktop.id, restore_layout.value,
+            )
+            was_tracked = True
+
+        return was_tracked
+
+    def _apply_client_fullscreen_requests(self):
+        """Enter/leave the normal desktop fullscreen layout at client request."""
+        pending = self.pending_client_fullscreen_requests
+        self.pending_client_fullscreen_requests = []
+        seat = self.seats[0] if self.seats else None
+        exited_in_batch = set()
+
+        for win, enter in pending:
+            if win.closed:
+                continue
+
+            if enter:
+                if win.desktop_id != 0 and win.desktop_id not in self.desktops:
+                    logger.debug(
+                        "Ignoring fullscreen request from unsupported window %s",
+                        win.app_id,
+                    )
+                    continue
+                # Only one client-requested fullscreen window can own the
+                # output. Restore any previous owner before replacing it.
+                for other in self.windows.values():
+                    if other is not win and other.client_fullscreen:
+                        self._end_client_fullscreen_tracking(other)
+
+                if win.desktop_id == 0:
+                    if (not win.client_fullscreen
+                            and id(win) not in exited_in_batch):
+                        win.client_fullscreen_restore_width = win.width
+                        win.client_fullscreen_restore_height = win.height
+                    win.client_fullscreen = True
+                    if seat is not None:
+                        self._focus_window(seat, win)
+                    logger.info("Client fullscreen entered for floating %s", win.app_id)
+                    continue
+
+                desktop = self.desktops[win.desktop_id]
+                # Focus before migrating out of split so the requesting side's
+                # top window becomes the fullscreen window.
+                if seat is not None:
+                    self._focus_window(seat, win)
+
+                if desktop.client_fullscreen_restore_layout is None:
+                    desktop.client_fullscreen_restore_layout = desktop.layout
+                desktop.client_fullscreen_window = win
+                win.client_fullscreen = True
+                self._set_layout_mode(LayoutMode.FULLSCREEN, desktop=desktop)
+                logger.info(
+                    "Client fullscreen entered for %s; desktop %d was %s",
+                    win.app_id, desktop.id,
+                    desktop.client_fullscreen_restore_layout.value,
+                )
+                continue
+
+            if not win.client_fullscreen:
+                logger.debug(
+                    "Ignoring fullscreen exit from inactive window %s", win.app_id
+                )
+                continue
+            self._end_client_fullscreen_tracking(win)
+            exited_in_batch.add(id(win))
+            logger.info("Client fullscreen exited for %s", win.app_id)
+
     def _is_wine_app(self, win):
         """Check if window is a Wine-based app that shouldn't be force-resized."""
         return win.app_id in ("org.vinegarhq.Sober", "sober", "sober_services")
+
+    def _active_client_fullscreen_window(self) -> Optional[WindowState]:
+        """Return the client-fullscreen owner visible in the current context."""
+        if self.floating_active:
+            for win in self.floating_stack:
+                if win.client_fullscreen and not win.closed:
+                    return win
+        win = self.current_desktop.client_fullscreen_window
+        if win is not None and win.client_fullscreen and not win.closed:
+            return win
+        return None
+
+    def _logical_fullscreen_windows(self) -> list:
+        """Return windows whose fullscreen state must survive visibility changes."""
+        fullscreen = []
+        for win in self.floating_stack:
+            if win.client_fullscreen and not win.closed:
+                fullscreen.append(win)
+        for desktop in self.desktops.values():
+            owner = desktop.client_fullscreen_window
+            if owner is not None and owner.client_fullscreen and not owner.closed:
+                fullscreen.append(owner)
+                continue
+            if desktop.layout == LayoutMode.FULLSCREEN:
+                win = desktop.get_focused_window()
+                if win is not None and not win.closed:
+                    fullscreen.append(win)
+        return fullscreen
+
+    def _propose_post_fullscreen_dimensions(self, win: WindowState, output: OutputState):
+        """Give a window usable dimensions in the same sequence as fullscreen exit."""
+        ua_x, ua_y, ua_w, ua_h = self._usable_area(output)
+        if win.desktop_id == 0:
+            width = win.client_fullscreen_restore_width or output.width // 2
+            height = win.client_fullscreen_restore_height or output.height // 2
+            win.proxy.set_tiled(EDGE_NONE)
+            win.proxy.propose_dimensions(width, height)
+            win.client_fullscreen_restore_width = 0
+            win.client_fullscreen_restore_height = 0
+            return
+
+        desktop = self.desktops.get(win.desktop_id)
+        if desktop is None:
+            return
+        if not self._is_wine_app(win):
+            win.proxy.set_tiled(EDGE_ALL)
+        width = ua_w // 2 if desktop.layout == LayoutMode.SPLIT else ua_w
+        win.proxy.propose_dimensions(width, ua_h)
 
     # -------------------------------------------------------------------
     # Apply manage state
@@ -2415,7 +2758,48 @@ class RiverWM:
 
         # Apply fullscreen state for current desktop
         desktop = self.current_desktop
-        if desktop.layout == LayoutMode.FULLSCREEN:
+        client_fullscreen = self._active_client_fullscreen_window()
+        if client_fullscreen is not None:
+            desired_fullscreen = client_fullscreen
+        elif desktop.layout == LayoutMode.FULLSCREEN:
+            desired_fullscreen = desktop.get_focused_window()
+        else:
+            desired_fullscreen = None
+
+        logical_fullscreen_ids = {
+            id(win) for win in self._logical_fullscreen_windows()
+        }
+
+        # Fullscreen state can outlive logical placement changes. Clear every
+        # stale compositor-fullscreen window first, including windows moved to
+        # floating or to another desktop, and give it exit dimensions in this
+        # same manage sequence as required by the protocol.
+        for win in self.windows.values():
+            if (win.closed or id(win) in logical_fullscreen_ids
+                    or not (win.is_fullscreen or win.is_informed_fullscreen)):
+                continue
+            if win.is_fullscreen:
+                win.proxy.exit_fullscreen()
+                win.is_fullscreen = False
+            if win.is_informed_fullscreen:
+                win.proxy.inform_not_fullscreen()
+                win.is_informed_fullscreen = False
+            self._propose_post_fullscreen_dimensions(win, output)
+
+        if client_fullscreen is not None and client_fullscreen.desktop_id == 0:
+            win = client_fullscreen
+            if win.width == 0 and win.height == 0:
+                ua_x, ua_y, ua_w, ua_h = self._usable_area(output)
+                win.proxy.set_tiled(EDGE_NONE)
+                win.proxy.propose_dimensions(ua_w, ua_h)
+            else:
+                if not win.is_fullscreen:
+                    win.proxy.fullscreen(output.proxy)
+                    win.is_fullscreen = True
+                if not win.is_informed_fullscreen:
+                    win.proxy.inform_fullscreen()
+                    win.is_informed_fullscreen = True
+        elif desktop.layout == LayoutMode.FULLSCREEN:
             ua_x, ua_y, ua_w, ua_h = self._usable_area(output)
             for win in desktop.windows:
                 if not win.closed:
@@ -2437,23 +2821,31 @@ class RiverWM:
                         win.needs_resize_jolt = False
                         logger.debug("manage_state: FULLSCREEN JOLT propose %dx%d for %s (cur %dx%d)",
                                      jolt_w, ua_h, win.app_id, win.width, win.height)
-                    elif win == focused:
+                    elif win is desired_fullscreen:
                         if not win.is_fullscreen:
                             win.proxy.fullscreen(output.proxy)
-                            win.proxy.inform_fullscreen()
                             win.is_fullscreen = True
+                        if not win.is_informed_fullscreen:
+                            win.proxy.inform_fullscreen()
+                            win.is_informed_fullscreen = True
                     else:
                         if win.is_fullscreen:
                             win.proxy.exit_fullscreen()
-                            win.proxy.inform_not_fullscreen()
                             win.is_fullscreen = False
+                        if win.is_informed_fullscreen:
+                            win.proxy.inform_not_fullscreen()
+                            win.is_informed_fullscreen = False
         else:
             # Ensure no windows are fullscreen in non-fullscreen modes
             for win in desktop.all_windows():
-                if not win.closed and win.is_fullscreen:
+                if win.closed:
+                    continue
+                if win.is_fullscreen:
                     win.proxy.exit_fullscreen()
-                    win.proxy.inform_not_fullscreen()
                     win.is_fullscreen = False
+                if win.is_informed_fullscreen:
+                    win.proxy.inform_not_fullscreen()
+                    win.is_informed_fullscreen = False
 
         # Propose dimensions for visible windows and inform tiled state
         ua_x, ua_y, ua_w, ua_h = self._usable_area(output)
@@ -2539,6 +2931,17 @@ class RiverWM:
                 seen.add(key)
                 if not win.closed:
                     win.proxy.hide()
+
+        client_fullscreen = self._active_client_fullscreen_window()
+        if client_fullscreen is not None:
+            for win in self.floating_stack:
+                if not win.closed:
+                    win.proxy.hide()
+            client_fullscreen.proxy.show()
+            if client_fullscreen.node:
+                client_fullscreen.node.place_top()
+            self._layout_popups(output, focused)
+            return
 
         # Current desktop
         desktop = self.current_desktop
@@ -2781,6 +3184,8 @@ class RiverWM:
             key_table.append((XKB_KEY_XF86AudioLowerVolume, 0, "_action_spawn", (self.config.volume_down,)))
         if self.config.volume_mute:
             key_table.append((XKB_KEY_XF86AudioMute, 0, "_action_spawn", (self.config.volume_mute,)))
+        if self.config.mic_mute:
+            key_table.append((XKB_KEY_XF86AudioMicMute, 0, "_action_spawn", (self.config.mic_mute,)))
         for keysym, mods, method, args in key_table:
             bind_key(keysym, mods, lambda m=method, a=args: getattr(self, m)(*a))
 
@@ -2835,6 +3240,35 @@ class RiverWM:
         self.wm_proxy.manage_dirty()
 
     def _action_set_layout(self, mode: LayoutMode):
+        # An explicit layout key takes ownership from any temporary F11/client
+        # fullscreen request. A later client exit must not undo the user's
+        # chosen layout.
+        desktop = self.current_desktop
+        if desktop.client_fullscreen_window is not None:
+            logger.info(
+                "Explicit layout %s overrides client fullscreen on desktop %d",
+                mode.value, desktop.id,
+            )
+            self._end_client_fullscreen_tracking(
+                desktop.client_fullscreen_window
+            )
+        elif desktop.client_fullscreen_restore_layout is not None:
+            # The saved owner may not have been re-advertised yet. An explicit
+            # layout choice still takes ownership from that pending restore.
+            desktop.client_fullscreen_restore_layout = None
+            self._canceled_restart_fullscreen_locations.add(desktop.id)
+        if self._saved_state is not None:
+            # Floating fullscreen is output-global and has no desktop restore
+            # marker, so also cancel an unresolved saved floating owner.
+            self._canceled_restart_fullscreen_locations.add(0)
+        for win in self.floating_stack:
+            if win.client_fullscreen:
+                logger.info(
+                    "Explicit layout %s overrides floating client fullscreen",
+                    mode.value,
+                )
+                self._end_client_fullscreen_tracking(win)
+                break
         self._set_layout_mode(mode)
         self.wm_proxy.manage_dirty()
 
