@@ -851,6 +851,7 @@ class RiverWM:
         self.screencopy_proxy = None   # ZwlrScreencopyManagerV1 proxy
         self._wl_outputs: dict = {}    # global name -> WlOutput proxy
         self._wl_output_names: dict = {}  # id(WlOutput proxy) -> connector name
+        self._bound_globals: dict = {}  # global name -> (iface_name, proxy)
         self._initial_outputs_done: bool = False
 
         # Cursor shape (reset cursor when pointer enters wm2-owned surfaces)
@@ -891,6 +892,8 @@ class RiverWM:
         self._screencopy_started_at: float = 0.0
         self._screencopy_generation: int = 0
         self._pending_preview_capture: Optional[int] = None
+        self._screencopy_frame = None
+        self._screencopy_cap = None
 
         # Protocol sequence state
         self.in_manage: bool = False
@@ -959,6 +962,7 @@ class RiverWM:
 
         self.registry = self.display.get_registry()
         self.registry.dispatcher["global"] = self._on_global
+        self.registry.dispatcher["global_remove"] = self._on_global_remove
         self.display.roundtrip()
 
         if self.wm_proxy is None:
@@ -972,41 +976,82 @@ class RiverWM:
 
     def _on_global(self, registry, id_num, iface_name, version):
         """Handle wl_registry.global events to bind our protocol interfaces."""
+        proxy = self._bind_global(registry, id_num, iface_name, version)
+        if proxy is not None:
+            self._bound_globals[id_num] = (iface_name, proxy)
+
+    def _bind_global(self, registry, id_num, iface_name, version):
+        """Bind a protocol global, returning the bound proxy or None."""
         if iface_name == "river_window_manager_v1":
             self.wm_proxy = registry.bind(id_num, RiverWindowManagerV1, min(version, 4))
             self._setup_wm_events()
+            return self.wm_proxy
         elif iface_name == "river_xkb_bindings_v1":
             self.xkb_bindings_proxy = registry.bind(id_num, RiverXkbBindingsV1, min(version, 2))
+            return self.xkb_bindings_proxy
         elif iface_name == "river_xkb_config_v1":
             self.xkb_config_proxy = registry.bind(id_num, RiverXkbConfigV1, min(version, 1))
             self.xkb_config_proxy.dispatcher["xkb_keyboard"] = self._on_xkb_keyboard
             logger.info("Bound river_xkb_config_v1 — runtime keymap control enabled")
+            return self.xkb_config_proxy
         elif iface_name == "river_layer_shell_v1":
             self.layer_shell_proxy = registry.bind(id_num, RiverLayerShellV1, min(version, 1))
             logger.info("Bound river_layer_shell_v1 — layer surfaces enabled")
+            return self.layer_shell_proxy
         elif iface_name == "wl_compositor":
             self.compositor_proxy = registry.bind(id_num, WlCompositor, min(version, 4))
+            return self.compositor_proxy
         elif iface_name == "wl_shm":
             self.shm_proxy = registry.bind(id_num, WlShm, min(version, 1))
+            return self.shm_proxy
         elif iface_name == "wl_output":
             wl_out = registry.bind(id_num, WlOutput, min(version, 4))
             wl_out.dispatcher["scale"] = self._on_wl_output_scale
             wl_out.dispatcher["name"] = self._on_wl_output_name
             wl_out.dispatcher["done"] = self._on_wl_output_done
             self._wl_outputs[id_num] = wl_out
+            return wl_out
         elif iface_name == "zwlr_layer_shell_v1":
             self.layer_shell_bg_proxy = registry.bind(id_num, ZwlrLayerShellV1, min(version, 4))
             logger.info("Bound zwlr_layer_shell_v1 — wallpaper layer shell enabled")
+            return self.layer_shell_bg_proxy
         elif iface_name == "zwlr_screencopy_manager_v1":
             self.screencopy_proxy = registry.bind(id_num, ZwlrScreencopyManagerV1, min(version, 3))
             logger.info("Bound zwlr_screencopy_manager_v1 — screencopy enabled")
+            return self.screencopy_proxy
         elif iface_name == "wl_seat":
             self.wl_seat_proxy = registry.bind(id_num, WlSeat, min(version, 1))
             self.wl_seat_proxy.dispatcher["capabilities"] = self._on_wl_seat_capabilities
             logger.info("Bound wl_seat — cursor reset enabled")
+            return self.wl_seat_proxy
         elif iface_name == "wp_cursor_shape_manager_v1":
             self.cursor_shape_mgr = registry.bind(id_num, WpCursorShapeManagerV1, min(version, 1))
             logger.info("Bound wp_cursor_shape_manager_v1")
+            return self.cursor_shape_mgr
+        return None
+
+    def _on_global_remove(self, registry, id_num):
+        """Handle wl_registry.global_remove to release bound globals."""
+        entry = self._bound_globals.pop(id_num, None)
+        if entry is None:
+            return
+        iface_name, proxy = entry
+        if iface_name == "wl_output":
+            # Detach any OutputState still referencing this wl_output.
+            for out in self.outputs:
+                if out.wl_output is proxy:
+                    out.wl_output = None
+            self._wl_output_names.pop(id(proxy), None)
+            for key, val in list(self._wl_outputs.items()):
+                if val is proxy:
+                    del self._wl_outputs[key]
+            try:
+                proxy.release()
+            except Exception as e:
+                logger.warning("Failed to release removed wl_output: %s", e)
+            logger.info("wl_output global removed and released")
+        else:
+            logger.info("Global removed: %s", iface_name)
 
     # -------------------------------------------------------------------
     # WM event handlers
@@ -1599,6 +1644,10 @@ class RiverWM:
             if elapsed > 1.0:
                 logger.warning("Abandoning stale screencopy capture after %.2fs", elapsed)
                 self._screencopy_generation += 1
+                self._release_screencopy_capture(
+                    self._screencopy_frame, self._screencopy_cap)
+                self._screencopy_frame = None
+                self._screencopy_cap = None
                 self._screencopy_in_flight = False
                 self._pending_preview_capture = None
             elif preview_required:
@@ -1607,25 +1656,50 @@ class RiverWM:
             else:
                 return False
 
-        if self._screencopy_in_flight:
-            if preview_required:
-                self._pending_preview_capture = desktop_id
-                return True
-            return False
-
         self._screencopy_in_flight = True
         self._screencopy_started_at = time.monotonic()
         self._screencopy_generation += 1
         generation = self._screencopy_generation
         frame = self.screencopy_proxy.capture_output(0, out.wl_output)
+        self._screencopy_frame = frame
         # State for this capture (stored in closure)
         cap = {"fmt": 0, "width": 0, "height": 0, "stride": 0,
                "fd": -1, "pool": None, "buf": None, "desktop_id": desktop_id,
                "generation": generation}
+        self._screencopy_cap = cap
+
+    def _release_screencopy_capture(self, frame, cap):
+        """Release fd/buffer/pool/frame resources for a screencopy capture."""
+        if cap is not None:
+            if cap["fd"] >= 0:
+                try:
+                    os.close(cap["fd"])
+                except OSError:
+                    pass
+                cap["fd"] = -1
+            if cap["buf"] is not None:
+                try:
+                    cap["buf"].destroy()
+                except Exception:
+                    pass
+                cap["buf"] = None
+            if cap["pool"] is not None:
+                try:
+                    cap["pool"].destroy()
+                except Exception:
+                    pass
+                cap["pool"] = None
+        if frame is not None:
+            try:
+                frame.destroy()
+            except Exception:
+                pass
 
         def _finish_capture():
             if cap["generation"] != self._screencopy_generation:
                 return
+            self._screencopy_frame = None
+            self._screencopy_cap = None
             self._screencopy_in_flight = False
             self._screencopy_started_at = 0.0
             next_desktop = self._pending_preview_capture
@@ -1678,14 +1752,8 @@ class RiverWM:
                              cap["desktop_id"], w, h, panel_w, panel_h)
             except Exception as e:
                 logger.warning("Screencopy ready handler failed: %s", e)
-                if cap["fd"] >= 0:
-                    os.close(cap["fd"])
             finally:
-                if cap["buf"] is not None:
-                    cap["buf"].dispatcher["release"] = lambda p: p.destroy()
-                if cap["pool"] is not None:
-                    cap["pool"].destroy()
-                frame.destroy()
+                self._release_screencopy_capture(frame, cap)
 
             # If the preview is waiting for this capture, render now
             try:
@@ -1699,13 +1767,7 @@ class RiverWM:
 
         def _on_failed(proxy):
             logger.warning("Screencopy capture failed for desktop %d", cap["desktop_id"])
-            if cap["fd"] >= 0:
-                os.close(cap["fd"])
-            if cap["buf"] is not None:
-                cap["buf"].destroy()
-            if cap["pool"] is not None:
-                cap["pool"].destroy()
-            frame.destroy()
+            self._release_screencopy_capture(frame, cap)
             _finish_capture()
 
         frame.dispatcher["buffer"] = _on_buffer
