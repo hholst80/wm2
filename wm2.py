@@ -12,6 +12,7 @@ License: MIT
 import ctypes
 import ctypes.util
 import enum
+import errno
 import json
 import logging
 import os
@@ -70,6 +71,17 @@ from pywayland.protocol.cursor_shape_v1 import (
 )
 
 logger = logging.getLogger("wm2")
+
+
+def _is_retryable_display_error(error: RuntimeError) -> bool:
+    """Return whether pywayland reported a transient display read error."""
+    return str(error) == f"Failed with error: {errno.EAGAIN}"
+
+
+def _backoff_after_eagain(delay: float) -> float:
+    """Back off before retrying a transient display error."""
+    time.sleep(delay)
+    return min(delay * 2, 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -3583,6 +3595,7 @@ class RiverWM:
 
     def _run_simple_loop(self):
         """Original blocking dispatch loop (no managed processes)."""
+        eagain_delay = 0.01
         while self.running and not self.restart_requested:
             try:
                 ret = self.display.dispatch(block=True)
@@ -3590,10 +3603,16 @@ class RiverWM:
                     logger.error("display.dispatch returned %d, connection lost", ret)
                     break
                 self.display.flush()
+                eagain_delay = 0.01
             except KeyboardInterrupt:
                 logger.info("Interrupted, shutting down")
                 break
             except Exception as e:
+                if isinstance(e, RuntimeError):
+                    if _is_retryable_display_error(e):
+                        logger.debug("Wayland display temporarily unavailable; backing off %.2fs", eagain_delay)
+                        eagain_delay = _backoff_after_eagain(eagain_delay)
+                        continue
                 logger.error("Error in event loop: %s", e, exc_info=True)
                 if isinstance(e, RuntimeError):
                     self.crash_reason = str(e)
@@ -3610,6 +3629,7 @@ class RiverWM:
         display_ptr_int = int(_wl_ffi.cast("uintptr_t", display_ptr))
         wl_fd = self.display.get_fd()
         pipe_fd = pm.pipe_fd
+        eagain_delay = 0.01
 
         poller = select.poll()
         poller.register(wl_fd, select.POLLIN)
@@ -3646,12 +3666,12 @@ class RiverWM:
 
                 # Process any due restarts (also covers timeout wakeups)
                 pm.process_restarts()
+                eagain_delay = 0.01
 
             except KeyboardInterrupt:
                 logger.info("Interrupted, shutting down")
                 break
             except Exception as e:
-                logger.error("Error in poll loop: %s", e, exc_info=True)
                 # Cancel any pending read to avoid deadlock
                 try:
                     cancel_read(display_ptr_int)
@@ -3659,6 +3679,12 @@ class RiverWM:
                     pass
                 # Any RuntimeError from the Wayland display is fatal
                 # (EPIPE=32, EPROTOCOL=71, etc.) — retrying just log-loops
+                if isinstance(e, RuntimeError):
+                    if _is_retryable_display_error(e):
+                        logger.debug("Wayland display temporarily unavailable; backing off %.2fs", eagain_delay)
+                        eagain_delay = _backoff_after_eagain(eagain_delay)
+                        continue
+                logger.error("Error in poll loop: %s", e, exc_info=True)
                 if isinstance(e, RuntimeError):
                     self.crash_reason = str(e)
                     logger.error("Fatal display error, will restart: %s", e)
