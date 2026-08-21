@@ -15,3 +15,6 @@ wm2 = "wm2:main"
 
 [tool.setuptools]
 py-modules = ["wm2"]
+
+[tool.setuptools.packages.find]
+include = ["protocols*"]
